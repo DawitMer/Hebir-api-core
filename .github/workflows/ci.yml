@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: api-core-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests (seat oversell, webhook idempotency, matching)
+        run: npm run test:critical
+      - name: Full unit suite
+        run: npm test
+      - name: Health e2e smoke
+        run: npm run test:e2e
+      - name: Build
+        run: npm run build
+      - name: Smoke script syntax
+        run: node --check scripts/smoke-test.mjs && node --check scripts/webhook-idempotency-load.mjs && node --check scripts/seat-oversell-load.mjs
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: lint-test-build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: hebir/api-core:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

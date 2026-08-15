@@ -1,0 +1,63 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: hebir-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hebir
+      POSTGRES_PASSWORD: hebir
+      POSTGRES_DB: hebir
+    ports:
+      - "5432:5432"
+    volumes:
+      - hebir-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hebir"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Transaction-mode pooler for local scale testing.
+  # App: DATABASE_URL=postgresql://hebir:hebir@127.0.0.1:6432/hebir
+  # Migrations / admin: DATABASE_DIRECT_URL=postgresql://hebir:hebir@127.0.0.1:5432/hebir
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.19.1-p0
+    container_name: hebir-pgbouncer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://hebir:hebir@postgres:5432/hebir
+      AUTH_TYPE: plain
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 400
+      DEFAULT_POOL_SIZE: 20
+      MIN_POOL_SIZE: 2
+      RESERVE_POOL_SIZE: 5
+      SERVER_RESET_QUERY: DISCARD ALL
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits,options
+      MAX_DB_CONNECTIONS: 40
+      MAX_USER_CONNECTIONS: 40
+    ports:
+      - "6432:5432"
+
+  redis:
+    image: redis:7-alpine
+    container_name: hebir-redis
+    restart: unless-stopped
+    ports:
+      - "16380:6379"
+    volumes:
+      - hebir-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  hebir-postgres-data:
+  hebir-redis-data:

@@ -1,0 +1,57 @@
+name: neon-pg-dump-backup
+
+# Optional cold backup. See .github/workflows/README-BACKUP.md and docs/BACKUP_PITR.md.
+# Enable the cron only after secrets are set.
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "17 2 * * *"   # 02:17 UTC daily
+
+jobs:
+  pg-dump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install client tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client awscli
+
+      - name: Dump Neon (direct URL)
+        env:
+          DATABASE_DIRECT_URL: ${{ secrets.DATABASE_DIRECT_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_DIRECT_URL:-}" ]; then
+            echo "DATABASE_DIRECT_URL secret missing — skipping dump"
+            exit 0
+          fi
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "Dumping to hebir-${STAMP}.dump"
+          pg_dump "$DATABASE_DIRECT_URL" -Fc -f "hebir-${STAMP}.dump"
+          echo "DUMP_FILE=hebir-${STAMP}.dump" >> "$GITHUB_ENV"
+
+      - name: Upload to S3
+        if: env.DUMP_FILE != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          BACKUP_S3_BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BACKUP_S3_BUCKET:-}" ] || [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
+            echo "S3 secrets missing — dump kept as workflow artifact only"
+            exit 0
+          fi
+          KEY="neon/$(date -u +%Y/%m)/${DUMP_FILE}"
+          aws s3 cp "$DUMP_FILE" "s3://${BACKUP_S3_BUCKET}/${KEY}"
+          echo "Uploaded s3://${BACKUP_S3_BUCKET}/${KEY}"
+
+      - name: Retain dump as artifact (7 days)
+        if: env.DUMP_FILE != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: neon-dump
+          path: ${{ env.DUMP_FILE }}
+          retention-days: 7
