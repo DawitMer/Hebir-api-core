@@ -21,14 +21,36 @@ export const FareRateKeys = {
 
 export type FareRateKey = (typeof FareRateKeys)[keyof typeof FareRateKeys];
 
-/** Defaults used when a row is missing from the DB (first boot seed). */
-export const FARE_RATE_DEFAULTS: Record<FareRateKey, number> = {
-  // 20 ETB flag drop + 0.008 ETB/m (= 8 ETB/km) matches prior km-based defaults.
+/**
+ * Addis Ababa street-speed used when OSRM duration is missing.
+ * 25 km/h was highway-optimistic; mixed traffic here is closer to 18.
+ */
+export const ADDIS_AVERAGE_SPEED_KMH = 18;
+
+/**
+ * Typical urban road / crow-fly ratio. Applied only when the client did
+ * not send a snapped road distance (OSRM).
+ */
+export const URBAN_ROAD_CIRCUITY = 1.35;
+
+/** Previous seed — used to detect "never customized" rows to migrate. */
+export const LEGACY_FARE_RATE_DEFAULTS: Record<FareRateKey, number> = {
   [FareRateKeys.initialFeeEtb]: 20,
   [FareRateKeys.perMeterEtb]: 0.008,
   [FareRateKeys.perMinuteEtb]: 1.5,
   [FareRateKeys.perWaitMinuteEtb]: 0,
   [FareRateKeys.minimumEtb]: 20,
+  [FareRateKeys.surgeMaxMultiplier]: 2.5,
+};
+
+/** Defaults used when a row is missing from the DB (first boot seed). */
+export const FARE_RATE_DEFAULTS: Record<FareRateKey, number> = {
+  // Ride/Feres-class Addis fares (2026): flag drop + ~16 ETB/km + traffic time.
+  [FareRateKeys.initialFeeEtb]: 50,
+  [FareRateKeys.perMeterEtb]: 0.016,
+  [FareRateKeys.perMinuteEtb]: 2,
+  [FareRateKeys.perWaitMinuteEtb]: 2,
+  [FareRateKeys.minimumEtb]: 70,
   [FareRateKeys.surgeMaxMultiplier]: 2.5,
 };
 

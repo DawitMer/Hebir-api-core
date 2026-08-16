@@ -10,6 +10,7 @@ import { AuditTrail } from '../kyc/entities/audit-trail.entity';
 import { DriverExpense } from '../gov/entities/driver-expense.entity';
 import { DriverLocationHistory } from '../location/entities/driver-location-history.entity';
 import { IncidentsModule } from '../incidents/incidents.module';
+import { RidesModule } from '../rides/rides.module';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
 
@@ -27,6 +28,7 @@ import { AdminService } from './admin.service';
       DriverLocationHistory,
     ]),
     IncidentsModule,
+    RidesModule,
   ],
   controllers: [AdminController],
   providers: [AdminService],

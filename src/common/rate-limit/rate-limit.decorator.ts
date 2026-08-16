@@ -85,4 +85,10 @@ export const RateLimitPresets = {
     windowSec: 60,
     keyBy: 'user' as const,
   },
+  chat: {
+    prefix: 'rl:chat',
+    limit: 40,
+    windowSec: 60,
+    keyBy: 'user' as const,
+  },
 } satisfies Record<string, RateLimitOptions>;

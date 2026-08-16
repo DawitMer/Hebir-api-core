@@ -94,7 +94,7 @@ export function estimateDetourMinutes(
   tripDest: GeoPoint,
   pickup: GeoPoint,
   dropoff: GeoPoint,
-  averageSpeedKmh = 30,
+  averageSpeedKmh = 18,
 ): number {
   const directKm = haversineKm(tripStart, tripDest);
   const withDetourKm =

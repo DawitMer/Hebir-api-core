@@ -60,10 +60,13 @@ export class BookingService {
     const holdMinutes = this.configuration.get<number>('seat_hold_duration_minutes');
     const holdExpiresAt = new Date(Date.now() + holdMinutes * 60 * 1000);
 
-    const distanceKm = haversineKm(riderRequest.pickup, riderRequest.dropoff);
+    const { distanceKm, durationMinutes } = this.fareService.quotedTripMetrics(
+      riderRequest.pickup,
+      riderRequest.dropoff,
+    );
     const fare = await this.fareService.calculate({
       distanceKm,
-      durationMinutes: this.fareService.estimateDurationMinutes(distanceKm),
+      durationMinutes,
       zoneId: zoneIdFor(riderRequest.pickup),
     });
 

@@ -7,7 +7,10 @@ import {
   FareRates,
   FARE_RATE_DEFAULTS,
   perKmFromMeter,
+  ADDIS_AVERAGE_SPEED_KMH,
+  URBAN_ROAD_CIRCUITY,
 } from './fare-rates';
+import { haversineKm, type GeoPoint } from '../matching/geo/geo.util';
 
 export interface FareCalculationInput {
   /** Trip distance in kilometers (converted internally to meters). */
@@ -35,6 +38,8 @@ export interface FareBreakdown {
   timeCharge: number;
   waitCharge: number;
   distanceMeters: number;
+  durationMinutes: number;
+  waitMinutes: number;
   rates: FareRates;
   surgeMultiplier: number;
   subtotal: number;
@@ -104,7 +109,7 @@ export class FareService {
    *   timeCharge     = fare_per_minute_etb × durationMinutes
    *   waitCharge     = fare_per_wait_minute_etb × waitMinutes
    *   subtotal       = max(initial + distance + time + wait, minimum)
-   *   total          = round(subtotal × surge, 2)
+   *   total          = round(subtotal × surge × vehicle)   // whole ETB (cash)
    *
    * Initial fee and per-meter rate are independent DB keys — change one
    * without touching the other.
@@ -137,8 +142,7 @@ export class FareService {
           : 1;
 
     const vehicleMultiplier = this.vehicleTypeMultiplier(input.vehicleType);
-    const total =
-      Math.round(subtotal * surgeMultiplier * vehicleMultiplier * 100) / 100;
+    const total = Math.round(subtotal * surgeMultiplier * vehicleMultiplier);
 
     return {
       vehicleMultiplier,
@@ -147,9 +151,10 @@ export class FareService {
       timeCharge: Math.round(timeCharge * 100) / 100,
       waitCharge: Math.round(waitCharge * 100) / 100,
       distanceMeters: Math.round(distanceMeters * 100) / 100,
+      durationMinutes: Math.round(durationMinutes * 10) / 10,
+      waitMinutes: Math.round(waitMinutes * 10) / 10,
       rates: {
         ...rates,
-        // expose derived km for dashboards that still think in km
       },
       surgeMultiplier,
       subtotal: Math.round(subtotal * 100) / 100,
@@ -157,6 +162,47 @@ export class FareService {
       platformFee: 0,
       base: initialFee,
     };
+  }
+
+  /**
+   * Road kilometres + minutes for quoting. Client OSRM values win; otherwise
+   * crow-fly distance is scaled by urban circuity and paced at Addis speed.
+   */
+  quotedTripMetrics(
+    pickup: GeoPoint,
+    dropoff: GeoPoint,
+    clientDistanceKm?: number | null,
+    clientDurationMinutes?: number | null,
+  ): { distanceKm: number; durationMinutes: number } {
+    const distanceKm =
+      clientDistanceKm != null && clientDistanceKm > 0
+        ? clientDistanceKm
+        : haversineKm(pickup, dropoff) * URBAN_ROAD_CIRCUITY;
+    const durationMinutes =
+      clientDurationMinutes != null && clientDurationMinutes > 0
+        ? clientDurationMinutes
+        : this.estimateDurationMinutes(distanceKm);
+    return { distanceKm, durationMinutes };
+  }
+
+  /**
+   * At completion, keep the quoted road distance (the rider bought that trip)
+   * but bill travel minutes from the clock so Bole traffic is not free.
+   * Floor 90% of quote / cap 140% so a forgotten End Trip cannot explode fare.
+   */
+  settledDurationMinutes(
+    quotedDurationMinutes: number,
+    startedAt: Date | null | undefined,
+    completedAt: Date = new Date(),
+  ): number {
+    const quoted = Math.max(0, quotedDurationMinutes);
+    if (!startedAt) return quoted;
+    const elapsed =
+      (completedAt.getTime() - new Date(startedAt).getTime()) / 60_000;
+    if (!Number.isFinite(elapsed) || elapsed < 0.5) return quoted;
+    const floor = quoted * 0.9;
+    const cap = Math.max(quoted * 1.4, quoted + 8);
+    return Math.min(Math.max(elapsed, floor), cap);
   }
 
   /**
@@ -185,7 +231,10 @@ export class FareService {
   }
 
   /** City-speed ETA helper used when true routing duration is unavailable. */
-  estimateDurationMinutes(distanceKm: number, averageSpeedKmh = 25): number {
+  estimateDurationMinutes(
+    distanceKm: number,
+    averageSpeedKmh = ADDIS_AVERAGE_SPEED_KMH,
+  ): number {
     if (distanceKm <= 0) return 0;
     return (distanceKm / averageSpeedKmh) * 60;
   }
@@ -196,7 +245,7 @@ export class FareService {
       ...rates,
       perKmEtb: perKmFromMeter(rates.perMeterEtb),
       formula:
-        'total = max(initialFee + perMeter×meters + perMinute×minutes + wait, minimum) × surge',
+        'total = round(max(initialFee + perMeter×meters + perMinute×minutes + wait, minimum) × surge × vehicle)',
     };
   }
 

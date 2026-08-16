@@ -22,6 +22,7 @@ import { RatingsModule } from './modules/ratings/ratings.module';
 import { UsersModule } from './modules/users/users.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { IncidentsModule } from './modules/incidents/incidents.module';
+import { SupportModule } from './modules/support/support.module';
 import { HealthController } from './modules/admin/health.controller';
 import { getRequestId } from './observability/request-context';
 import { LocationSvcModule } from './common/location-svc/location-svc.module';
@@ -91,6 +92,7 @@ import { GeocodingModule } from './common/geocoding/geocoding.module';
     UsersModule,
     AdminModule,
     IncidentsModule,
+    SupportModule,
     SubscriptionModule,
     FareModule,
     MatchingModule,

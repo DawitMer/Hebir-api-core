@@ -36,13 +36,13 @@ export const CONFIG_DEFAULTS: Record<string, unknown> = {
   seat_hold_duration_minutes: 2,
   max_results_returned: 20,
   // Fare levers (also defined in fare/fare-rates.ts — keep values aligned).
-  fare_initial_fee_etb: 20,
-  fare_per_meter_etb: 0.008, // 8 ETB / km
-  fare_per_minute_etb: 1.5,
-  fare_per_wait_minute_etb: 0,
-  fare_minimum_etb: 20,
+  fare_initial_fee_etb: 50,
+  fare_per_meter_etb: 0.016, // 16 ETB / km
+  fare_per_minute_etb: 2,
+  fare_per_wait_minute_etb: 2,
+  fare_minimum_etb: 70,
   surge_max_multiplier: 2.5,
   // Legacy aliases (read by migration only; prefer fare_initial_fee / per_meter).
-  fare_base_etb: 20,
-  fare_per_km_etb: 8,
+  fare_base_etb: 50,
+  fare_per_km_etb: 16,
 };

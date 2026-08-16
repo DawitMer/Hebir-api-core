@@ -19,7 +19,6 @@ import {
   angularDifference,
   bearing,
   estimateDetourMinutes,
-  haversineKm,
   localBearingAtPickup,
   zoneIdFor,
 } from './geo/geo.util';
@@ -236,10 +235,13 @@ export class MatchingService {
     const heldByTrip = await this.heldSeatsByTripIds(trips.map((t) => t.id));
 
     // Pickup-zone fare/surge is identical for every candidate on this request.
-    const distanceKm = haversineKm(request.pickup, request.dropoff);
+    const { distanceKm, durationMinutes } = this.fareService.quotedTripMetrics(
+      request.pickup,
+      request.dropoff,
+    );
     const fare = await this.fareService.calculate({
       distanceKm,
-      durationMinutes: this.fareService.estimateDurationMinutes(distanceKm),
+      durationMinutes,
       zoneId,
     });
 

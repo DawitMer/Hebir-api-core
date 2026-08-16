@@ -217,14 +217,12 @@ export class RidesService {
       await this.geocoding.reverseGeocodePair(dto.pickup, dto.dropoff);
 
     const vehicleType = normalizeRideVehicleType(dto.vehicleType);
-    const distanceKm =
-      dto.distanceKm != null && dto.distanceKm > 0
-        ? dto.distanceKm
-        : haversineKm(dto.pickup, dto.dropoff);
-    const durationMinutes =
-      dto.durationMinutes != null && dto.durationMinutes > 0
-        ? dto.durationMinutes
-        : this.fareService.estimateDurationMinutes(distanceKm);
+    const { distanceKm, durationMinutes } = this.fareService.quotedTripMetrics(
+      dto.pickup,
+      dto.dropoff,
+      dto.distanceKm,
+      dto.durationMinutes,
+    );
 
     // Lock live surge at request so rider quote, driver offer, and final
     // charge share one multiplier for this ride (especially when demand is high).
@@ -842,10 +840,14 @@ export class RidesService {
 
     const distanceKm = ride.distanceM
       ? ride.distanceM / 1000
-      : haversineKm(ride.pickup, ride.dropoff);
-    const durationMinutes = ride.durationS
+      : this.fareService.quotedTripMetrics(ride.pickup, ride.dropoff).distanceKm;
+    const quotedMinutes = ride.durationS
       ? ride.durationS / 60
       : this.fareService.estimateDurationMinutes(distanceKm);
+    const durationMinutes = this.fareService.settledDurationMinutes(
+      quotedMinutes,
+      ride.startedAt,
+    );
 
     const fareBreakdown = await this.fareService.calculate({
       distanceKm,
@@ -1046,7 +1048,7 @@ export class RidesService {
   private async buildOfferPayload(ride: Ride) {
     const distanceKm = ride.distanceM
       ? ride.distanceM / 1000
-      : haversineKm(ride.pickup, ride.dropoff);
+      : this.fareService.quotedTripMetrics(ride.pickup, ride.dropoff).distanceKm;
     const durationMinutes = ride.durationS
       ? ride.durationS / 60
       : this.fareService.estimateDurationMinutes(distanceKm);
@@ -1276,14 +1278,12 @@ export class RidesService {
       await this.geocoding.reverseGeocodePair(dto.pickup, dto.dropoff);
 
     const vehicleType = normalizeRideVehicleType(dto.vehicleType);
-    const distanceKm =
-      dto.distanceKm != null && dto.distanceKm > 0
-        ? dto.distanceKm
-        : haversineKm(dto.pickup, dto.dropoff);
-    const durationMinutes =
-      dto.durationMinutes != null && dto.durationMinutes > 0
-        ? dto.durationMinutes
-        : this.fareService.estimateDurationMinutes(distanceKm);
+    const { distanceKm, durationMinutes } = this.fareService.quotedTripMetrics(
+      dto.pickup,
+      dto.dropoff,
+      dto.distanceKm,
+      dto.durationMinutes,
+    );
 
     const quotedFare = await this.fareService.calculate({
       distanceKm,
@@ -2244,14 +2244,38 @@ export class RidesService {
     return driverError?.code === '23505';
   }
 
+  /** Ride↔driver chat lives for 14 days, then the daily purge deletes it. */
+  static readonly RIDE_CHAT_RETENTION_DAYS = 14;
+
   /** Participants only — chat history for an active or recent ride. */
   async listRideMessages(rideId: string, viewerId: string) {
     await this.assertRideParticipant(rideId, viewerId);
-    return this.rideMessages.find({
+    return this.rideChatThread(rideId);
+  }
+
+  /** Ops staff can look up a trip thread while it is still retained. */
+  async listRideMessagesForStaff(rideId: string) {
+    const ride = await this.rides.findOne({ where: { id: rideId } });
+    if (!ride) throw new NotFoundException('Ride not found');
+    return this.rideChatThread(rideId);
+  }
+
+  private async rideChatThread(rideId: string) {
+    const messages = await this.rideMessages.find({
       where: { rideId },
       order: { createdAt: 'ASC' },
       take: 500,
     });
+    const retentionMs =
+      RidesService.RIDE_CHAT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    const newest = messages[messages.length - 1]?.createdAt ?? new Date();
+    const expiresAt = new Date(new Date(newest).getTime() + retentionMs);
+    return {
+      threadId: rideId,
+      retentionDays: RidesService.RIDE_CHAT_RETENTION_DAYS,
+      expiresAt,
+      messages,
+    };
   }
 
   async sendRideMessage(rideId: string, senderId: string, body: string) {
@@ -2297,16 +2321,19 @@ export class RidesService {
     return ride;
   }
 
-  /** Drop chat older than 30 days so trip threads do not linger forever. */
+  /** Drop ride chat after 14 days so trip threads do not linger forever. */
   @Cron(CronExpression.EVERY_DAY_AT_4AM)
   async purgeExpiredRideMessages() {
-    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(
+      Date.now() -
+        RidesService.RIDE_CHAT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    );
     const result = await this.rideMessages.delete({
       createdAt: LessThan(cutoff),
     });
     if (result.affected) {
       this.logger.log(
-        `Purged ${result.affected} ride chat message(s) older than 30 days`,
+        `Purged ${result.affected} ride chat message(s) older than ${RidesService.RIDE_CHAT_RETENTION_DAYS} days`,
       );
     }
   }

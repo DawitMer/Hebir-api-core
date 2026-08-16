@@ -116,13 +116,14 @@ export class FareController {
       this.fareService.estimateDurationMinutes(dto.distanceKm);
     const zoneId =
       dto.zoneId ?? (dto.pickup ? zoneIdFor(dto.pickup) : undefined);
-    return this.fareService.calculate({
+    const breakdown = await this.fareService.calculate({
       distanceKm: dto.distanceKm,
       durationMinutes,
       waitMinutes: dto.waitMinutes,
       zoneId,
       vehicleType: dto.vehicleType,
     });
+    return breakdown;
   }
 
   /** Ops/admin — change initial fee / per-meter without a code deploy. */

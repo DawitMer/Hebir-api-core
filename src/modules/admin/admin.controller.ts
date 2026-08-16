@@ -4,6 +4,7 @@ import {
   Controller,
   Get,
   Param,
+  ParseUUIDPipe,
   Post,
   Query,
   UseGuards,
@@ -11,6 +12,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { IsBoolean, IsOptional, IsString } from 'class-validator';
 import { AdminService } from './admin.service';
+import { RidesService } from '../rides/rides.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -33,6 +35,7 @@ export class AdminController {
   constructor(
     private readonly admin: AdminService,
     private readonly config: ConfigService,
+    private readonly rides: RidesService,
   ) {}
 
   @Get('users')
@@ -78,6 +81,11 @@ export class AdminController {
   @Get('search')
   search(@Query('q') q = '') {
     return this.admin.search(q);
+  }
+
+  @Get('rides/:id/messages')
+  rideChat(@Param('id', ParseUUIDPipe) id: string) {
+    return this.rides.listRideMessagesForStaff(id);
   }
 
   @Get('operations/live')

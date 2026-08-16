@@ -17,6 +17,7 @@ describe('MatchingService findMatches', () => {
   let fareService: {
     calculate: jest.Mock;
     estimateDurationMinutes: jest.Mock;
+    quotedTripMetrics: jest.Mock;
   };
   let metrics: {
     matchDuration: { startTimer: jest.Mock };
@@ -104,6 +105,10 @@ describe('MatchingService findMatches', () => {
         surgeMultiplier: 1,
       }),
       estimateDurationMinutes: jest.fn().mockReturnValue(15),
+      quotedTripMetrics: jest.fn().mockReturnValue({
+        distanceKm: 6,
+        durationMinutes: 20,
+      }),
     };
     const endTimer = jest.fn();
     metrics = {
