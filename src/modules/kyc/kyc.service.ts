@@ -17,7 +17,11 @@ import {
   DocumentSubmission,
 } from './entities/document-submission.entity';
 import { AuditTrail } from './entities/audit-trail.entity';
-import { ComplianceAlert, AlertStatus } from './entities/compliance-alert.entity';
+import {
+  ComplianceAlert,
+  AlertSeverity,
+  AlertStatus,
+} from './entities/compliance-alert.entity';
 import { ReviewDecision, ReviewDecisionDto } from './dto/review-decision.dto';
 import {
   ConfirmDocumentDto,
@@ -126,15 +130,10 @@ export class KycService {
   }
 
   async createPresign(driverId: string, dto: PresignDocumentDto) {
-    const verification = await this.getMyVerification(driverId);
-    if (
-      verification.status === VerificationStatus.APPROVED ||
-      verification.status === VerificationStatus.REJECTED
-    ) {
-      throw new ConflictException(
-        'Cannot upload documents for a closed application',
-      );
-    }
+    const verification = await this.assertCanUpload(
+      driverId,
+      dto.documentType,
+    );
 
     const storageKey = this.storage.buildObjectKey(
       driverId,
@@ -175,7 +174,10 @@ export class KycService {
   }
 
   async confirmUpload(driverId: string, dto: ConfirmDocumentDto) {
-    const verification = await this.getMyVerification(driverId);
+    const verification = await this.assertCanUpload(
+      driverId,
+      dto.documentType,
+    );
     if (!dto.storageKey.startsWith(`kyc/${driverId}/`)) {
       throw new ForbiddenException('Invalid storage key');
     }
@@ -200,13 +202,13 @@ export class KycService {
 
     await this.storage.markUploaded(dto.storageKey);
 
-    // Replace prior submission of the same type on this verification.
     const prior = await this.documents.find({
       where: {
         driverVerificationId: verification.id,
         documentType: dto.documentType,
       },
     });
+    const replacingExpired = prior.some((doc) => this.isExpired(doc));
     if (prior.length) {
       await this.documents.remove(prior);
     }
@@ -228,6 +230,18 @@ export class KycService {
       await this.verifications.save(verification);
     }
 
+    if (replacingExpired) {
+      await this.complianceAlerts.save(
+        this.complianceAlerts.create({
+          driverId,
+          title: 'Expired document replaced',
+          description: `Driver uploaded a new ${dto.documentType} after expiry.`,
+          severity: AlertSeverity.MEDIUM,
+          status: AlertStatus.OPEN,
+        }),
+      );
+    }
+
     await this.recordAudit(driverId, 'driver', 'kyc.document_upload', saved.id, {
       documentType: dto.documentType,
       storageKey: dto.storageKey,
@@ -243,12 +257,61 @@ export class KycService {
     return this.storage.readLocalBody(storageKey);
   }
 
+  /**
+   * After approval: add a missing type any time; replace an existing type
+   * only when it has expired (or ops asked for a resubmit / rejected it).
+   * Open applications still allow replace during first KYC.
+   */
+  private async assertCanUpload(driverId: string, documentType: string) {
+    const verification = await this.getMyVerification(driverId);
+    if (verification.status === VerificationStatus.REJECTED) {
+      throw new ConflictException(
+        'This application was rejected. Start a new KYC application first.',
+      );
+    }
+
+    const existing = await this.documents.findOne({
+      where: {
+        driverVerificationId: verification.id,
+        documentType,
+      },
+      order: { submittedAt: 'DESC' },
+    });
+
+    if (verification.status !== VerificationStatus.APPROVED) {
+      return verification;
+    }
+
+    if (!existing) {
+      return verification;
+    }
+
+    const replaceable =
+      this.isExpired(existing) ||
+      existing.status === DocumentReviewStatus.REJECTED ||
+      existing.status === DocumentReviewStatus.RESUBMISSION_REQUESTED;
+    if (!replaceable) {
+      throw new ConflictException(
+        'This document is still valid. You can replace it only after it expires.',
+      );
+    }
+    return verification;
+  }
+
+  private isExpired(doc: DocumentSubmission) {
+    return !!doc.expiresAt && doc.expiresAt.getTime() < Date.now();
+  }
+
   private async refreshMissingFlags(verificationId: string) {
     const verification = await this.getVerification(verificationId);
     const docs = await this.documents.find({
       where: { driverVerificationId: verificationId },
     });
-    const types = new Set(docs.map((d) => d.documentType));
+    const types = new Set(
+      docs
+        .filter((d) => !this.isExpired(d))
+        .map((d) => d.documentType),
+    );
     verification.missingId = !types.has('national_id') && !types.has('license');
     verification.missingInsurance = !types.has('insurance');
     await this.verifications.save(verification);
