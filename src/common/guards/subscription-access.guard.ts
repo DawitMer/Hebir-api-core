@@ -20,6 +20,8 @@ export class SubscriptionAccessGuard implements CanActivate {
     const request = context.switchToHttp().getRequest();
     const driverId = request.user?.userId;
 
+    if (!this.subscriptionService.isEnforced()) return true;
+
     const active = await this.subscriptionService.isActive(driverId);
     if (!active) {
       throw new ForbiddenException({

@@ -118,6 +118,14 @@ class EnvironmentVariables {
   @IsString()
   PAYMENT_WEBHOOK_SECRET: string;
 
+  /**
+   * When `true`, unpaid drivers cannot go online, post routes, or receive
+   * offers. Default off until live subscription payments exist.
+   */
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  REQUIRE_DRIVER_SUBSCRIPTION?: string;
+
   /** Hours after ride completion during which tips are accepted (default 48). */
   @IsOptional()
   @IsInt()

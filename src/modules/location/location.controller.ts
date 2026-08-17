@@ -102,7 +102,8 @@ export class LocationController {
     // only pay for the (cached) subscription check when it can change the outcome.
     const subscribed =
       status === DriverStatus.ONLINE
-        ? await this.isSubscribedCached(user.userId)
+        ? !this.subscriptionService.isEnforced() ||
+          (await this.isSubscribedCached(user.userId))
         : false;
 
     // Dispatchable pins: online + active sub. Tracking pins: reserved/on_trip

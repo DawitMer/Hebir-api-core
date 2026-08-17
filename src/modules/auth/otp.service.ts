@@ -66,7 +66,8 @@ export class OtpService {
     const hash = this.hash(phoneNumber, code);
     await this.redis.setex(`${OTP_PREFIX}${phoneNumber}`, OTP_TTL_SEC, hash);
 
-    if (!isProd) {
+    const nodeEnv = this.config.get<string>('NODE_ENV');
+    if (nodeEnv === 'development' || nodeEnv === 'test') {
       return { sent: true, expiresInSec: OTP_TTL_SEC, debugCode: code };
     }
 
@@ -83,11 +84,21 @@ export class OtpService {
   /** Validates and burns a one-time SMS code. */
   async consumeCode(phoneNumber: string, code: string) {
     const key = `${OTP_PREFIX}${phoneNumber}`;
+    const failKey = `otp:fail:${phoneNumber}`;
     const expected = await this.redis.get(key);
     if (!expected || expected !== this.hash(phoneNumber, code)) {
+      const fails = await this.redis.incr(failKey);
+      if (fails === 1) await this.redis.expire(failKey, OTP_TTL_SEC);
+      if (fails >= 5) {
+        await this.redis.del(key);
+        throw new UnauthorizedException(
+          'Too many incorrect codes. Request a new OTP.',
+        );
+      }
       throw new UnauthorizedException('Invalid or expired OTP');
     }
     await this.redis.del(key);
+    await this.redis.del(failKey);
   }
 
   async verify(phoneNumber: string, code: string) {

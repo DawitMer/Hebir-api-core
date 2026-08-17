@@ -22,11 +22,14 @@ import {
 import { RefreshToken } from './entities/refresh-token.entity';
 import { RegisterDto, SELF_SERVICE_ROLES } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { LoginMfaDto } from './dto/login-mfa.dto';
 import { OtpLoginDto } from './dto/otp-login.dto';
 import { OtpService } from './otp.service';
 
 const SALT_ROUNDS = 10;
 const ACCESS_DENY_PREFIX = 'jwt:deny:';
+const STAFF_MFA_PREFIX = 'staff:mfa:';
+const STAFF_MFA_TTL_SEC = 300;
 
 /** Roles/standing are re-read from Postgres at most this often per user. */
 const AUTH_CONTEXT_TTL_MS = 15_000;
@@ -129,6 +132,51 @@ export class AuthService {
     if (!(await bcrypt.compare(dto.password, user.passwordHash))) {
       throw new UnauthorizedException('Invalid credentials');
     }
+    if (user.standing === AccountStanding.BANNED) {
+      throw new ForbiddenException('This account has been suspended');
+    }
+
+    const mfaToken = randomBytes(32).toString('hex');
+    await this.redis.set(
+      `${STAFF_MFA_PREFIX}${mfaToken}`,
+      user.id,
+      'EX',
+      STAFF_MFA_TTL_SEC,
+    );
+    return {
+      mfaRequired: true as const,
+      mfaToken,
+      phoneNumber: user.phoneNumber,
+      user: {
+        id: user.id,
+        phoneNumber: user.phoneNumber,
+        fullName: user.fullName,
+        username: user.username,
+        roles: user.roles,
+      },
+    };
+  }
+
+  /**
+   * Second factor for staff password login. JWTs are issued only after the
+   * SMS code bound to this challenge is consumed.
+   */
+  async loginWithMfa(dto: LoginMfaDto) {
+    const key = `${STAFF_MFA_PREFIX}${dto.mfaToken}`;
+    const userId = await this.redis.get(key);
+    if (!userId) {
+      throw new UnauthorizedException('Verification session expired. Sign in again.');
+    }
+
+    const user = await this.users.findOne({ where: { id: userId } });
+    if (!user) {
+      await this.redis.del(key);
+      throw new UnauthorizedException('Account not found');
+    }
+
+    await this.otp.consumeCode(user.phoneNumber, dto.code);
+    await this.redis.del(key);
+
     if (user.standing === AccountStanding.BANNED) {
       throw new ForbiddenException('This account has been suspended');
     }

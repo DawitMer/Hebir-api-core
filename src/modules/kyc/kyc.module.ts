@@ -10,6 +10,7 @@ import { KycStorageService } from './kyc-storage.service';
 import { SubscriptionModule } from '../subscription/subscription.module';
 import { RedisModule } from '../../redis/redis.module';
 import { UserAccount } from '../auth/entities/user-account.entity';
+import { Vehicle } from '../rides/entities/vehicle.entity';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { UserAccount } from '../auth/entities/user-account.entity';
       AuditTrail,
       ComplianceAlert,
       UserAccount,
+      Vehicle,
     ]),
     SubscriptionModule,
     RedisModule,

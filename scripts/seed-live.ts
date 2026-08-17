@@ -25,13 +25,23 @@ async function auth(
   const e164 = phone.startsWith('+') ? phone : `+251${phone}`;
   if (role === 'admin' || role === 'gov_officer') {
     try {
-      const { data } = await axios.post(`${API}/auth/login`, {
+      const started = await axios.post(`${API}/auth/login`, {
         phoneNumber: e164,
         password: PASSWORD,
       });
+      const otp = await axios.post(`${API}/auth/otp/request`, {
+        phoneNumber: e164,
+      });
+      const code = otp.data?.debugCode as string | undefined;
+      if (!started.data?.mfaToken || !code) {
+        throw new Error(`Staff MFA unavailable for ${e164}`);
+      }
+      const { data } = await axios.post(`${API}/auth/login/mfa`, {
+        mfaToken: started.data.mfaToken,
+        code,
+      });
       return data as { accessToken: string; user: { id: string } };
     } catch {
-      // Staff must be provisioned by seed:demo — do not create via public register.
       throw new Error(`Staff login failed for ${e164}; run npm run seed:demo`);
     }
   }

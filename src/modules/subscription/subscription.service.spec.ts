@@ -19,6 +19,7 @@ describe('SubscriptionService webhook idempotency', () => {
   let trips: { update: jest.Mock };
   let configuration: { get: jest.Mock };
   let notifications: { notify: jest.Mock };
+  let envConfig: { get: jest.Mock };
   let redis: { set: jest.Mock; del: jest.Mock };
 
   const dto = {
@@ -55,7 +56,8 @@ describe('SubscriptionService webhook idempotency', () => {
       }),
     };
     notifications = { notify: jest.fn() };
-    redis = { set: jest.fn(), del: jest.fn() };
+    envConfig = { get: jest.fn().mockReturnValue('false') };
+    redis = { set: jest.fn().mockResolvedValue('OK'), del: jest.fn() };
 
     service = new SubscriptionService(
       subscriptions as never,
@@ -64,6 +66,7 @@ describe('SubscriptionService webhook idempotency', () => {
       trips as never,
       configuration as never,
       notifications as never,
+      envConfig as never,
       redis as never,
     );
   });
@@ -137,6 +140,29 @@ describe('SubscriptionService webhook idempotency', () => {
     const result = await service.handleConfirmedPayment(dto);
     expect(result).toEqual({ activated: true });
     expect(subscriptions.save).toHaveBeenCalled();
+  });
+
+  it('does not extend a cycle already paid with this reference', async () => {
+    paymentEvents.findOne.mockResolvedValue({
+      id: 'evt-1',
+      providerReference: dto.providerReference,
+      processed: false,
+      driverId: dto.driverId,
+      amount: dto.amount,
+    });
+    subscriptions.findOne.mockResolvedValue({
+      driverId: dto.driverId,
+      state: SubscriptionState.ACTIVE,
+      lastPaymentReference: dto.providerReference,
+    });
+
+    const result = await service.handleConfirmedPayment(dto);
+
+    expect(result).toEqual({ alreadyProcessed: true });
+    expect(subscriptions.save).not.toHaveBeenCalled();
+    expect(paymentEvents.update).toHaveBeenCalledWith('evt-1', {
+      processed: true,
+    });
   });
 
   it('rejects underpayment without activating', async () => {

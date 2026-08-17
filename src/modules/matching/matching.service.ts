@@ -72,8 +72,8 @@ export class MatchingService {
    * here since this is the point of entry into the matching pool.
    */
   async publishTrip(driverId: string, dto: PublishTripDto) {
-    const active = await this.subscriptionService.isActive(driverId);
-    if (!active) {
+    const mayDrive = await this.subscriptionService.mayAccessMarketplace(driverId);
+    if (!mayDrive) {
       throw new ForbiddenException('Active subscription required to publish a trip');
     }
 

@@ -31,6 +31,7 @@ import {
 import { KycStorageService } from './kyc-storage.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { UserAccount } from '../auth/entities/user-account.entity';
+import { Vehicle } from '../rides/entities/vehicle.entity';
 
 /** Review queues are worked top-down; this bounds one page. */
 const MAX_LIST_ROWS = 500;
@@ -48,6 +49,8 @@ export class KycService {
     private readonly complianceAlerts: Repository<ComplianceAlert>,
     @InjectRepository(UserAccount)
     private readonly users: Repository<UserAccount>,
+    @InjectRepository(Vehicle)
+    private readonly vehicles: Repository<Vehicle>,
     private readonly subscriptionService: SubscriptionService,
     private readonly storage: KycStorageService,
   ) {}
@@ -95,6 +98,7 @@ export class KycService {
       existing &&
       existing.status !== VerificationStatus.REJECTED
     ) {
+      await this.ensureVehicleFromApplication(driverId, existing, dto);
       return existing;
     }
 
@@ -112,7 +116,39 @@ export class KycService {
     await this.recordAudit(driverId, 'driver', 'kyc.submit', created.id, {
       licenseNumber: dto.licenseNumber,
     });
+    await this.ensureVehicleFromApplication(driverId, created, dto);
     return created;
+  }
+
+  /**
+   * KYC used to store make/model/plate only on the verification row, so
+   * Profile → Vehicle stayed empty. Attach a vehicles row the first time.
+   */
+  private async ensureVehicleFromApplication(
+    driverId: string,
+    verification: DriverVerification,
+    dto?: StartVerificationDto,
+  ) {
+    const existing = await this.vehicles.findOne({ where: { driverId } });
+    if (existing) return;
+
+    const plate = (dto?.licenseNumber ?? verification.licenseNumber)?.trim();
+    const type = (dto?.vehicleType ?? verification.vehicleType)?.trim();
+    if (!plate || !type) return;
+
+    const parts = type.split(/\s+/).filter(Boolean);
+    const make = parts[0];
+    const model = parts.slice(1).join(' ') || make;
+    await this.vehicles.save(
+      this.vehicles.create({
+        driverId,
+        make,
+        model,
+        plate,
+        capacity: 4,
+        color: dto?.vehicleColor?.trim() || null,
+      }),
+    );
   }
 
   async getMyVerification(driverId: string) {
@@ -121,6 +157,7 @@ export class KycService {
       order: { submittedAt: 'DESC' },
     });
     if (!existing) throw new NotFoundException('No KYC application yet');
+    await this.ensureVehicleFromApplication(driverId, existing);
     return existing;
   }
 
@@ -258,9 +295,8 @@ export class KycService {
   }
 
   /**
-   * After approval: add a missing type any time; replace an existing type
-   * only when it has expired (or ops asked for a resubmit / rejected it).
-   * Open applications still allow replace during first KYC.
+   * After approval: add a missing type or replace an existing file any time.
+   * Rejected applications must start a new KYC first.
    */
   private async assertCanUpload(driverId: string, documentType: string) {
     const verification = await this.getMyVerification(driverId);
@@ -286,15 +322,6 @@ export class KycService {
       return verification;
     }
 
-    const replaceable =
-      this.isExpired(existing) ||
-      existing.status === DocumentReviewStatus.REJECTED ||
-      existing.status === DocumentReviewStatus.RESUBMISSION_REQUESTED;
-    if (!replaceable) {
-      throw new ConflictException(
-        'This document is still valid. You can replace it only after it expires.',
-      );
-    }
     return verification;
   }
 

@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, LessThanOrEqual, QueryFailedError, Repository } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -19,6 +20,10 @@ const EXPIRY_JOB_LOCK_KEY = 'lock:subscription-expiry-job';
 const EXPIRY_JOB_LOCK_TTL_MS = 5 * 60 * 1000; // 5 minutes, safely longer than one run
 /** Rows processed per query page (avoids loading the full table). */
 const EXPIRY_PAGE_SIZE = 500;
+/** Serializes concurrent PSP retries of the same providerReference. */
+const WEBHOOK_LOCK_PREFIX = 'lock:payhook:';
+const WEBHOOK_LOCK_TTL_MS = 15_000;
+const WEBHOOK_LOCK_WAIT_MS = 8_000;
 
 @Injectable()
 export class SubscriptionService {
@@ -35,8 +40,17 @@ export class SubscriptionService {
     private readonly trips: Repository<Trip>,
     private readonly configuration: ConfigurationService,
     private readonly notifications: NotificationsGateway,
+    private readonly config: ConfigService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {}
+
+  /**
+   * Paid-plan marketplace gate. Off by default until live collections exist.
+   * Set REQUIRE_DRIVER_SUBSCRIPTION=true to restore the paywall.
+   */
+  isEnforced(): boolean {
+    return this.config.get<string>('REQUIRE_DRIVER_SUBSCRIPTION') === 'true';
+  }
 
   /**
    * Handles a confirmed payment notification from a provider.
@@ -46,10 +60,38 @@ export class SubscriptionService {
    * an unverified request must never reach here (blueprint section 15).
    */
   async handleConfirmedPayment(dto: PaymentWebhookDto) {
-    // Step 3 of blueprint 5.2: an already-PROCESSED reference is a no-op,
-    // always acknowledged, never re-processed. An unprocessed row (e.g. a
-    // prior underpayment) does NOT burn the reference — a retry re-runs the
-    // amount check so it can still activate.
+    const lockKey = `${WEBHOOK_LOCK_PREFIX}${dto.providerReference}`;
+    const locked = await this.acquireWebhookLock(lockKey);
+    if (!locked) {
+      const raced = await this.paymentEvents.findOne({
+        where: { providerReference: dto.providerReference },
+      });
+      if (raced?.processed) {
+        return { alreadyProcessed: true };
+      }
+      this.logger.warn(
+        `Webhook lock timeout for ${dto.providerReference} — ask the provider to retry`,
+      );
+      return { activated: false, reason: 'busy' };
+    }
+
+    try {
+      return await this.processConfirmedPayment(dto);
+    } finally {
+      await this.redis.del(lockKey);
+    }
+  }
+
+  /**
+   * Step 3 of blueprint 5.2: an already-PROCESSED reference is a no-op,
+   * always acknowledged, never re-processed. An unprocessed row (e.g. a
+   * prior underpayment) does NOT burn the reference — a retry re-runs the
+   * amount check so it can still activate.
+   *
+   * Callers must hold `lock:payhook:{providerReference}` — unique-index
+   * catch-up alone still lets N workers activate() before processed=true.
+   */
+  private async processConfirmedPayment(dto: PaymentWebhookDto) {
     const existing = await this.paymentEvents.findOne({
       where: { providerReference: dto.providerReference },
     });
@@ -109,8 +151,33 @@ export class SubscriptionService {
       return { activated: false, reason: 'underpayment' };
     }
 
-    await this.activate(event.driverId, event);
+    const outcome = await this.activate(event.driverId, event);
+    if (outcome === 'duplicate') {
+      return { alreadyProcessed: true };
+    }
     return { activated: true };
+  }
+
+  private async acquireWebhookLock(lockKey: string): Promise<boolean> {
+    const deadline = Date.now() + WEBHOOK_LOCK_WAIT_MS;
+    while (Date.now() < deadline) {
+      const acquired = await this.redis.set(
+        lockKey,
+        '1',
+        'PX',
+        WEBHOOK_LOCK_TTL_MS,
+        'NX',
+      );
+      if (acquired) return true;
+      const existing = await this.paymentEvents.findOne({
+        where: {
+          providerReference: lockKey.slice(WEBHOOK_LOCK_PREFIX.length),
+        },
+      });
+      if (existing?.processed) return false;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return false;
   }
 
   private isUniqueViolation(error: unknown): boolean {
@@ -121,8 +188,18 @@ export class SubscriptionService {
     );
   }
 
-  private async activate(driverId: string, event: PaymentEvent) {
+  private async activate(
+    driverId: string,
+    event: PaymentEvent,
+  ): Promise<'applied' | 'duplicate'> {
     let subscription = await this.subscriptions.findOne({ where: { driverId } });
+    if (
+      subscription?.lastPaymentReference === event.providerReference &&
+      subscription.state === SubscriptionState.ACTIVE
+    ) {
+      await this.paymentEvents.update(event.id, { processed: true });
+      return 'duplicate';
+    }
     const fromState = subscription?.state ?? SubscriptionState.INACTIVE;
 
     const cycleDays = this.configuration.get<number>('cycle_length_days');
@@ -160,6 +237,7 @@ export class SubscriptionService {
 
     await this.paymentEvents.update(event.id, { processed: true });
     await this.invalidateActiveCache(driverId);
+    return 'applied';
   }
 
   /** Drop the GPS-path Redis gate so a fresh activation is indexed immediately. */
@@ -207,6 +285,12 @@ export class SubscriptionService {
     return subscription?.state === SubscriptionState.ACTIVE;
   }
 
+  /** True when the driver may go online / publish / receive offers. */
+  async mayAccessMarketplace(driverId: string): Promise<boolean> {
+    if (!this.isEnforced()) return true;
+    return this.isActive(driverId);
+  }
+
   /** Batch subscription gate for nearby-driver filtering (avoids N+1 at dispatch). */
   async filterActiveDriverIds(driverIds: string[]): Promise<Set<string>> {
     const active = new Set<string>();
@@ -217,6 +301,12 @@ export class SubscriptionService {
     });
     for (const row of rows) active.add(row.driverId);
     return active;
+  }
+
+  /** Same as [filterActiveDriverIds], but skips the paywall when it is off. */
+  async filterMarketplaceDriverIds(driverIds: string[]): Promise<Set<string>> {
+    if (!this.isEnforced()) return new Set(driverIds);
+    return this.filterActiveDriverIds(driverIds);
   }
 
   /**

@@ -1224,8 +1224,8 @@ export class RidesService {
     driverId: string,
     dto: DriverInitiatedRideDto,
   ): Promise<EnrichedRide> {
-    const activeSub = await this.subscriptionService.isActive(driverId);
-    if (!activeSub) {
+    const mayDrive = await this.subscriptionService.mayAccessMarketplace(driverId);
+    if (!mayDrive) {
       throw new ForbiddenException(
         'Active subscription required to start trips for riders',
       );
@@ -1257,6 +1257,15 @@ export class RidesService {
     });
     if (driverBusy) {
       throw new ConflictException('You already have an active trip');
+    }
+
+    const pendingOffer = await this.rides.findOne({
+      where: { offerDriverId: driverId, status: RideStatus.OFFERED },
+    });
+    if (pendingOffer) {
+      throw new ConflictException(
+        'Decline or wait out your current offer before starting another trip',
+      );
     }
 
     const profile = await this.driverProfiles.findOne({
@@ -1293,30 +1302,50 @@ export class RidesService {
     });
 
     const now = new Date();
-    const ride = await this.rides.save(
-      this.rides.create({
-        riderId: rider.id,
-        driverId,
-        pickup: dto.pickup,
-        dropoff: dto.dropoff,
-        pickupAddress: pickupAddress || dto.pickupAddress || null,
-        dropoffAddress: dropoffAddress || dto.dropoffAddress || null,
-        vehicleType,
-        distanceM: Math.round(distanceKm * 1000),
-        durationS: Math.round(durationMinutes * 60),
-        quotedSurgeMultiplier: quotedFare.surgeMultiplier,
-        status: RideStatus.ACCEPTED,
-        requestedAt: now,
-        matchedAt: now,
-        offerDriverId: null,
-        offerExpiresAt: null,
-      }),
-    );
-
-    await this.driverProfiles.update(
-      { userId: driverId },
-      { status: DriverStatus.ON_TRIP, idleSince: null },
-    );
+    let ride: Ride;
+    try {
+      ride = await this.rides.manager.transaction(async (em) => {
+        const flipped = await em
+          .createQueryBuilder()
+          .update(DriverProfile)
+          .set({ status: DriverStatus.ON_TRIP, idleSince: null })
+          .where('"userId" = :driverId', { driverId })
+          .andWhere('status IN (:...ok)', {
+            ok: [DriverStatus.OFFLINE, DriverStatus.ONLINE],
+          })
+          .execute();
+        if (!flipped.affected) {
+          throw new ConflictException(
+            'Finish or free your current offer/trip before starting another',
+          );
+        }
+        return em.save(
+          em.create(Ride, {
+            riderId: rider.id,
+            driverId,
+            pickup: dto.pickup,
+            dropoff: dto.dropoff,
+            pickupAddress: pickupAddress || dto.pickupAddress || null,
+            dropoffAddress: dropoffAddress || dto.dropoffAddress || null,
+            vehicleType,
+            distanceM: Math.round(distanceKm * 1000),
+            durationS: Math.round(durationMinutes * 60),
+            quotedSurgeMultiplier: quotedFare.surgeMultiplier,
+            status: RideStatus.ACCEPTED,
+            requestedAt: now,
+            matchedAt: now,
+            offerDriverId: null,
+            offerExpiresAt: null,
+          }),
+        );
+      });
+    } catch (error) {
+      if (error instanceof ConflictException) throw error;
+      if (this.isUniqueViolation(error)) {
+        throw new ConflictException('You already have an active trip');
+      }
+      throw error;
+    }
 
     const startCode = String(randomInt(1000, 9999));
     await this.storeStartCode(ride.id, startCode);
@@ -1746,7 +1775,7 @@ export class RidesService {
       this.driverProfiles.find({
         where: { userId: In(candidateIds), status: DriverStatus.ONLINE },
       }),
-      this.subscriptionService.filterActiveDriverIds(candidateIds),
+      this.subscriptionService.filterMarketplaceDriverIds(candidateIds),
       this.vehicles.find({ where: { driverId: In(candidateIds) } }),
     ]);
 
@@ -2151,8 +2180,8 @@ export class RidesService {
     connectedAccountId?: string,
   ) {
     if (online) {
-      const active = await this.subscriptionService.isActive(driverId);
-      if (!active) {
+      const mayDrive = await this.subscriptionService.mayAccessMarketplace(driverId);
+      if (!mayDrive) {
         throw new ForbiddenException(
           'Active subscription required to go online',
         );
@@ -2231,10 +2260,12 @@ export class RidesService {
   async getDriverPresence(driverId: string) {
     const profile = await this.driverProfiles.findOne({ where: { userId: driverId } });
     const subscriptionActive = await this.subscriptionService.isActive(driverId);
+    const subscriptionRequired = this.subscriptionService.isEnforced();
     return {
       profile: profile ?? null,
       subscriptionActive,
-      canGoOnline: subscriptionActive,
+      subscriptionRequired,
+      canGoOnline: !subscriptionRequired || subscriptionActive,
     };
   }
 

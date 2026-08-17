@@ -54,4 +54,9 @@ export class StartVerificationDto {
   @IsInt()
   @Min(1990)
   vehicleYear?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(24)
+  vehicleColor?: string;
 }

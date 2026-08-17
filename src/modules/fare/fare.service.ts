@@ -165,8 +165,8 @@ export class FareService {
   }
 
   /**
-   * Road kilometres + minutes for quoting. Client OSRM values win; otherwise
-   * crow-fly distance is scaled by urban circuity and paced at Addis speed.
+   * Road kilometres + minutes for quoting. Client OSRM may refine the path
+   * but cannot undercut crow-fly distance or invent a near-zero trip.
    */
   quotedTripMetrics(
     pickup: GeoPoint,
@@ -174,14 +174,28 @@ export class FareService {
     clientDistanceKm?: number | null,
     clientDurationMinutes?: number | null,
   ): { distanceKm: number; durationMinutes: number } {
-    const distanceKm =
-      clientDistanceKm != null && clientDistanceKm > 0
-        ? clientDistanceKm
-        : haversineKm(pickup, dropoff) * URBAN_ROAD_CIRCUITY;
-    const durationMinutes =
-      clientDurationMinutes != null && clientDurationMinutes > 0
-        ? clientDurationMinutes
-        : this.estimateDurationMinutes(distanceKm);
+    const crowFlyKm = haversineKm(pickup, dropoff);
+    const fallbackKm = Math.max(crowFlyKm * URBAN_ROAD_CIRCUITY, crowFlyKm);
+    const floorKm = crowFlyKm;
+    const capKm = Math.max(fallbackKm * 3, crowFlyKm + 1);
+
+    let distanceKm = fallbackKm;
+    if (clientDistanceKm != null && Number.isFinite(clientDistanceKm)) {
+      distanceKm = Math.min(Math.max(clientDistanceKm, floorKm), capKm);
+    }
+
+    const fallbackMinutes = this.estimateDurationMinutes(distanceKm);
+    let durationMinutes = fallbackMinutes;
+    if (
+      clientDurationMinutes != null &&
+      Number.isFinite(clientDurationMinutes) &&
+      clientDurationMinutes > 0
+    ) {
+      const floorMin = fallbackMinutes * 0.5;
+      const capMin = fallbackMinutes * 2.5;
+      durationMinutes = Math.min(Math.max(clientDurationMinutes, floorMin), capMin);
+    }
+
     return { distanceKm, durationMinutes };
   }
 

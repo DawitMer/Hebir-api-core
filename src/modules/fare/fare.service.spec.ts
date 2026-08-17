@@ -63,8 +63,21 @@ describe('FareService', () => {
     const kazanchis = { lat: 9.014, lng: 38.763 };
     const quoted = service.quotedTripMetrics(bole, kazanchis);
     const straight = service.quotedTripMetrics(bole, kazanchis, 1, 4);
-    expect(quoted.distanceKm).toBeGreaterThan(straight.distanceKm);
+    expect(quoted.distanceKm).toBeGreaterThan(0);
+    expect(straight.distanceKm).toBeGreaterThanOrEqual(
+      service.quotedTripMetrics(bole, kazanchis).distanceKm /
+        1.35,
+    );
     expect(quoted.durationMinutes).toBeGreaterThan(0);
+  });
+
+  it('rejects a client underquote below crow-fly distance', () => {
+    const bole = { lat: 8.9806, lng: 38.7578 };
+    const kazanchis = { lat: 9.014, lng: 38.763 };
+    const honest = service.quotedTripMetrics(bole, kazanchis);
+    const tampered = service.quotedTripMetrics(bole, kazanchis, 0.01, 0.1);
+    expect(tampered.distanceKm).toBeGreaterThanOrEqual(honest.distanceKm / 1.4);
+    expect(tampered.distanceKm).toBeGreaterThan(1);
   });
 
   it('settles duration from the trip clock within a 90–140% band', () => {

@@ -3,6 +3,7 @@ import { AuthService } from './auth.service';
 import { OtpService, RequestOtpDto, VerifyOtpDto } from './otp.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { LoginMfaDto } from './dto/login-mfa.dto';
 import { OtpLoginDto } from './dto/otp-login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -55,6 +56,14 @@ export class AuthController {
   @Post('login')
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
+  }
+
+  /** Completes staff MFA. Tokens are issued only after a valid SMS code. */
+  @UseGuards(RedisRateLimitGuard)
+  @RateLimit(RateLimitPresets.auth)
+  @Post('login/mfa')
+  loginMfa(@Body() dto: LoginMfaDto) {
+    return this.authService.loginWithMfa(dto);
   }
 
   @UseGuards(RedisRateLimitGuard)
