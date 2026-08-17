@@ -10,6 +10,7 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { OtpService } from './otp.service';
+import { SmsService } from './sms.service';
 
 @Module({
   imports: [
@@ -29,7 +30,7 @@ import { OtpService } from './otp.service';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, OtpService],
+  providers: [AuthService, JwtStrategy, OtpService, SmsService],
   exports: [AuthService, OtpService, TypeOrmModule],
 })
 export class AuthModule {}

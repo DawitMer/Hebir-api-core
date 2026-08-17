@@ -41,7 +41,7 @@ export class SubscriptionController {
     @Headers('x-webhook-signature') signature: string,
     @Req() req: RawBodyRequest<Request>,
   ) {
-    this.verifySignature(req.rawBody, dto, signature);
+    this.verifySignature(req.rawBody, signature);
     return this.subscriptionService.handleConfirmedPayment(dto);
   }
 
@@ -52,12 +52,18 @@ export class SubscriptionController {
    */
   private verifySignature(
     rawBody: Buffer | undefined,
-    dto: PaymentWebhookDto,
     signature: string,
   ) {
     const secret = this.config.get<string>('PAYMENT_WEBHOOK_SECRET');
-    const signed = rawBody?.length ? rawBody : Buffer.from(JSON.stringify(dto));
-    const expected = crypto.createHmac('sha256', secret).update(signed).digest('hex');
+    if (!rawBody?.length) {
+      throw new BadRequestException(
+        'Missing raw request body for signature verification',
+      );
+    }
+    const expected = crypto
+      .createHmac('sha256', secret)
+      .update(rawBody)
+      .digest('hex');
 
     if (!signature || !this.matchesSignature(signature, expected)) {
       throw new BadRequestException('Invalid webhook signature');

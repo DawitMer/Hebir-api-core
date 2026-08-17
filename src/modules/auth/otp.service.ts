@@ -9,6 +9,7 @@ import { Inject } from '@nestjs/common';
 import { createHash, randomInt, randomBytes } from 'crypto';
 import Redis from 'ioredis';
 import { REDIS_CLIENT } from '../../redis/redis.module';
+import { SmsService } from './sms.service';
 import { IsString, Length, Matches } from 'class-validator';
 import { ETHIOPIA_E164 } from './dto/register.dto';
 
@@ -46,6 +47,7 @@ export class OtpService {
   constructor(
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     private readonly config: ConfigService,
+    private readonly sms: SmsService,
   ) {}
 
   async request(phoneNumber: string) {
@@ -64,13 +66,17 @@ export class OtpService {
     const hash = this.hash(phoneNumber, code);
     await this.redis.setex(`${OTP_PREFIX}${phoneNumber}`, OTP_TTL_SEC, hash);
 
-    // Hook for real SMS (Twilio / local aggregator). Until wired, only
-    // expose the code outside production for local/dev testing.
     if (!isProd) {
       return { sent: true, expiresInSec: OTP_TTL_SEC, debugCode: code };
     }
 
-    // TODO: integrate SMS_PROVIDER when credentials are available.
+    try {
+      await this.sms.sendOtp(phoneNumber, code);
+    } catch (err) {
+      await this.redis.del(`${OTP_PREFIX}${phoneNumber}`);
+      throw err;
+    }
+
     return { sent: true, expiresInSec: OTP_TTL_SEC };
   }
 

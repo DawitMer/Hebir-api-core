@@ -12,7 +12,7 @@ import {
 } from 'class-validator';
 
 class EnvironmentVariables {
-  @IsIn(['development', 'production', 'test'])
+  @IsIn(['development', 'production', 'test', 'staging'])
   NODE_ENV: string;
 
   @IsInt()
@@ -298,6 +298,27 @@ class EnvironmentVariables {
   @IsOptional()
   @IsString()
   METRICS_TOKEN?: string;
+
+  /** `twilio` or `http`. Required in production (OTP send is fail-closed). */
+  @IsOptional()
+  @IsString()
+  SMS_PROVIDER?: string;
+
+  @IsOptional()
+  @IsString()
+  TWILIO_ACCOUNT_SID?: string;
+
+  @IsOptional()
+  @IsString()
+  TWILIO_AUTH_TOKEN?: string;
+
+  @IsOptional()
+  @IsString()
+  TWILIO_FROM?: string;
+
+  @IsOptional()
+  @IsString()
+  SMS_HTTP_URL?: string;
 
   @IsOptional()
   @IsIn(['true', 'false'])
