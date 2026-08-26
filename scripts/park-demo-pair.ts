@@ -37,22 +37,31 @@ async function main() {
     .post(`${API}/subscription/dev-activate`, {}, auth(driver.token))
     .catch(() => undefined);
 
+  const locHeaders = process.env.LOCATION_SVC_TOKEN
+    ? { headers: { 'X-Internal-Token': process.env.LOCATION_SVC_TOKEN } }
+    : {};
+
   await axios.post(
     `${API}/drivers/location`,
     { lat: DRIVER_AT.lat, lng: DRIVER_AT.lng },
     auth(driver.token),
   );
-  await axios.post(`${LOC}/drivers/location`, {
-    driverId: driver.userId,
-    location: DRIVER_AT,
-  });
+  await axios.post(
+    `${LOC}/drivers/location`,
+    {
+      driverId: driver.userId,
+      location: DRIVER_AT,
+    },
+    locHeaders,
+  ).catch(() => undefined);
   await axios.post(`${API}/drivers/presence`, { online: true }, auth(driver.token));
 
   const { data: presence } = await axios.get(`${API}/drivers/presence`, auth(driver.token));
   const { data: nearby } = await axios.get(`${LOC}/drivers/locations`, {
     params: { lat: RIDER_AT.lat, lng: RIDER_AT.lng, radiusKm: 1 },
-  });
-  const found = (nearby.drivers ?? []).some(
+    ...locHeaders,
+  }).catch(() => ({ data: { drivers: [] } }));
+  const found = (nearby?.drivers ?? []).some(
     (d: { driverId: string }) => d.driverId === driver.userId,
   );
 
