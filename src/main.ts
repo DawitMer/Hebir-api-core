@@ -77,7 +77,7 @@ async function bootstrap() {
   app.enableShutdownHooks();
 
   const port = config.get<number>('PORT') ?? 3000;
-  await app.listen(port);
+  await app.listen(port, '0.0.0.0');
   logger.log(`api-core listening on :${port}`);
 
   const shutdown = async (signal: string) => {

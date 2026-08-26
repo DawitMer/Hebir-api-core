@@ -332,4 +332,64 @@ export class GeocodingService {
         : `${Math.round(distanceM / 10) * 10} m`;
     return `${distanceLabel} ${bearing} of ${place.name}, ${suffix}`;
   }
+
+  async autocompletePlaces(query: string): Promise<{ placeId: string; title: string; subtitle: string }[]> {
+    if (!this.googleApiKey || !this.onlineEnabled || !query.trim()) return [];
+
+    try {
+      const { data } = await this.http.get(
+        'https://maps.googleapis.com/maps/api/place/autocomplete/json',
+        {
+          params: {
+            input: query,
+            key: this.googleApiKey,
+            components: 'country:et', // Restrict to Ethiopia
+            language: 'en',
+          },
+        },
+      );
+
+      if (data?.status !== 'OK' || !data.predictions) {
+        return [];
+      }
+
+      return data.predictions.map((p: any) => ({
+        placeId: p.place_id,
+        title: p.structured_formatting?.main_text ?? p.description,
+        subtitle: p.structured_formatting?.secondary_text ?? '',
+      }));
+    } catch (error) {
+      this.logger.warn(`Places autocomplete failed: ${(error as Error).message}`);
+      return [];
+    }
+  }
+
+  async getPlaceDetails(placeId: string): Promise<GeoPointLike | null> {
+    if (!this.googleApiKey || !this.onlineEnabled || !placeId) return null;
+
+    try {
+      const { data } = await this.http.get(
+        'https://maps.googleapis.com/maps/api/place/details/json',
+        {
+          params: {
+            place_id: placeId,
+            fields: 'geometry',
+            key: this.googleApiKey,
+          },
+        },
+      );
+
+      if (data?.status !== 'OK' || !data.result?.geometry?.location) {
+        return null;
+      }
+
+      return {
+        lat: data.result.geometry.location.lat,
+        lng: data.result.geometry.location.lng,
+      };
+    } catch (error) {
+      this.logger.warn(`Place details failed: ${(error as Error).message}`);
+      return null;
+    }
+  }
 }

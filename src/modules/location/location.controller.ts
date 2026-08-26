@@ -44,6 +44,8 @@ import {
 } from '../rides/ride-live-track';
 import { remainingEta } from '../rides/remaining-eta';
 
+import { GeocodingService } from '../../common/geocoding/geocoding.service';
+
 const TRACKABLE_RIDE_STATUSES = [
   RideStatus.MATCHED,
   RideStatus.ACCEPTED,
@@ -82,6 +84,7 @@ export class LocationController {
     private readonly config: ConfigService,
     private readonly locationSvc: LocationSvcClient,
     private readonly subscriptionService: SubscriptionService,
+    private readonly geocodingService: GeocodingService,
     @InjectRepository(DriverLocationHistory)
     private readonly history: Repository<DriverLocationHistory>,
     @InjectRepository(DriverProfile)
@@ -366,5 +369,94 @@ export class LocationController {
       },
       2500,
     );
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('location/places/autocomplete')
+  async autocompletePlaces(@Query('q') query: string) {
+    if (!query || !query.trim()) return [];
+    return this.geocodingService.autocompletePlaces(query);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('location/places/details')
+  async getPlaceDetails(@Query('placeId') placeId: string) {
+    if (!placeId) throw new BadRequestException('placeId is required');
+    const details = await this.geocodingService.getPlaceDetails(placeId);
+    if (!details) throw new BadRequestException('Place details not found');
+    return details;
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('location/places/recent')
+  async getRecentPlaces(@CurrentUser() user: { userId: string }) {
+    // 1. Fetch user's successful rides (as rider)
+    const rides = await this.rides.find({
+      where: { riderId: user.userId, status: RideStatus.COMPLETED },
+      order: { completedAt: 'DESC' },
+      take: 20, // get a few to filter out duplicates
+    });
+
+    const uniqueDestinations: { title: string; subtitle: string; lat: number; lng: number }[] = [];
+    const seen = new Set<string>();
+
+    for (const ride of rides) {
+      if (!ride.dropoffAddress || !ride.dropoff || !ride.dropoff.lat || !ride.dropoff.lng) continue;
+      
+      const parts = ride.dropoffAddress.split(',').map((p) => p.trim());
+      const title = parts[0] || ride.dropoffAddress;
+      const subtitle = parts.slice(1).join(', ') || 'Addis Ababa';
+      const key = title.toLowerCase();
+
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniqueDestinations.push({
+          title,
+          subtitle,
+          lat: ride.dropoff.lat,
+          lng: ride.dropoff.lng,
+        });
+      }
+
+      if (uniqueDestinations.length === 5) break;
+    }
+
+    if (uniqueDestinations.length > 0) {
+      return uniqueDestinations;
+    }
+
+    // Default popular places for new users
+    return [
+      {
+        title: 'Bole International Airport',
+        subtitle: 'Bole, Addis Ababa',
+        lat: 8.9778,
+        lng: 38.7993,
+      },
+      {
+        title: 'Edna Mall',
+        subtitle: 'Bole, Addis Ababa',
+        lat: 8.9959,
+        lng: 38.7891,
+      },
+      {
+        title: 'Meskel Square',
+        subtitle: 'Kirkos, Addis Ababa',
+        lat: 9.0107,
+        lng: 38.7612,
+      },
+      {
+        title: 'Friendship Park',
+        subtitle: 'Arada, Addis Ababa',
+        lat: 9.0227,
+        lng: 38.7644,
+      },
+      {
+        title: 'Hilton Addis Ababa',
+        subtitle: 'Kirkos, Addis Ababa',
+        lat: 9.0152,
+        lng: 38.7656,
+      },
+    ];
   }
 }
