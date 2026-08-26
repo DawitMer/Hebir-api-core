@@ -49,12 +49,12 @@ export const RateLimitPresets = {
     keyBy: 'ip' as const,
   },
   /**
-   * Driver GPS pings (~every 12s → ~5/min). Allow short bursts but
-   * block flooders (~20/min ≈ one ping every 3s).
+   * Driver GPS pings: idle ~12s, on-trip ~4s. 30/min leaves room for
+   * reconnect bursts without letting a flood spin Redis GEO.
    */
   gps: {
     prefix: 'rl:gps',
-    limit: 20,
+    limit: 30,
     windowSec: 60,
     keyBy: 'user' as const,
   },
@@ -90,5 +90,22 @@ export const RateLimitPresets = {
     limit: 40,
     windowSec: 60,
     keyBy: 'user' as const,
+  },
+  /**
+   * Accept / decline / start / complete / cancel. High enough for retries on
+   * weak Ethiopian networks, low enough to blunt a tap-storm.
+   */
+  rideMutate: {
+    prefix: 'rl:ride-mutate',
+    limit: 30,
+    windowSec: 60,
+    keyBy: 'user' as const,
+  },
+  /** Public fare quotes (display only — settlement is server-side). */
+  fareEstimate: {
+    prefix: 'rl:fare-estimate',
+    limit: 60,
+    windowSec: 60,
+    keyBy: 'ip' as const,
   },
 } satisfies Record<string, RateLimitOptions>;

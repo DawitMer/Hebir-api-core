@@ -5,9 +5,7 @@ import { bootstrappedFromBaseline } from '../migration-utils';
  * Driver TIN for gov/ops lookup at ~100k fleet scale.
  * Partial unique index + trigram on fullName for name search.
  */
-export class AddUserTinAndSearchIndexes1786552000000
-  implements MigrationInterface
-{
+export class AddUserTinAndSearchIndexes1786552000000 implements MigrationInterface {
   name = 'AddUserTinAndSearchIndexes1786552000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

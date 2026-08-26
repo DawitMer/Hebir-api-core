@@ -15,6 +15,7 @@ import { PaymentWebhookDto } from './dto/payment-webhook.dto';
 import { ConfigurationService } from './configuration.service';
 import { Trip } from '../matching/entities/trip.entity';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
+import { ChapaClient } from '../payments/chapa.client';
 
 const EXPIRY_JOB_LOCK_KEY = 'lock:subscription-expiry-job';
 const EXPIRY_JOB_LOCK_TTL_MS = 5 * 60 * 1000; // 5 minutes, safely longer than one run
@@ -41,6 +42,7 @@ export class SubscriptionService {
     private readonly configuration: ConfigurationService,
     private readonly notifications: NotificationsGateway,
     private readonly config: ConfigService,
+    private readonly chapa: ChapaClient,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {}
 
@@ -50,6 +52,32 @@ export class SubscriptionService {
    */
   isEnforced(): boolean {
     return this.config.get<string>('REQUIRE_DRIVER_SUBSCRIPTION') === 'true';
+  }
+
+  async createChapaCheckout(driverId: string) {
+    const amountEtb = this.configuration.get<number>('subscription_fee_etb');
+    return this.chapa.initializeSubscriptionCheckout({ driverId, amountEtb });
+  }
+
+  /**
+   * After Chapa verify API confirms success. Does not trust the webhook body
+   * amount/status — only the verify response.
+   */
+  async applyVerifiedChapaCharge(txRef: string) {
+    const verified = await this.chapa.verifyTxRef(txRef);
+    if (verified.status !== 'success') {
+      return { activated: false, reason: 'not_paid', status: verified.status };
+    }
+    if (verified.currency && verified.currency.toUpperCase() !== 'ETB') {
+      return { activated: false, reason: 'currency' };
+    }
+    return this.handleConfirmedPayment({
+      provider: PaymentProvider.CHAPA,
+      providerReference: verified.txRef,
+      driverId: verified.driverId,
+      amount: verified.amountEtb,
+      rawPayload: verified.raw,
+    });
   }
 
   /**
@@ -192,7 +220,9 @@ export class SubscriptionService {
     driverId: string,
     event: PaymentEvent,
   ): Promise<'applied' | 'duplicate'> {
-    let subscription = await this.subscriptions.findOne({ where: { driverId } });
+    let subscription = await this.subscriptions.findOne({
+      where: { driverId },
+    });
     if (
       subscription?.lastPaymentReference === event.providerReference &&
       subscription.state === SubscriptionState.ACTIVE
@@ -233,7 +263,10 @@ export class SubscriptionService {
     );
 
     // Restore any trips withdrawn during a previous suspension.
-    await this.trips.update({ driverId, inMatchingPool: false }, { inMatchingPool: true });
+    await this.trips.update(
+      { driverId, inMatchingPool: false },
+      { inMatchingPool: true },
+    );
 
     await this.paymentEvents.update(event.id, { processed: true });
     await this.invalidateActiveCache(driverId);
@@ -246,7 +279,9 @@ export class SubscriptionService {
   }
 
   async getStatus(driverId: string) {
-    const subscription = await this.subscriptions.findOne({ where: { driverId } });
+    const subscription = await this.subscriptions.findOne({
+      where: { driverId },
+    });
     return (
       subscription ?? {
         driverId,
@@ -281,7 +316,9 @@ export class SubscriptionService {
    * marketplace must call this first.
    */
   async isActive(driverId: string): Promise<boolean> {
-    const subscription = await this.subscriptions.findOne({ where: { driverId } });
+    const subscription = await this.subscriptions.findOne({
+      where: { driverId },
+    });
     return subscription?.state === SubscriptionState.ACTIVE;
   }
 

@@ -15,8 +15,13 @@ export enum PaymentType {
 
 export enum PaymentStatus {
   PENDING = 'pending',
+  AUTHORIZED = 'authorized',
   SUCCEEDED = 'succeeded',
+  CASH_PENDING = 'cash_pending',
+  CASH_COLLECTED = 'cash_collected',
   FAILED = 'failed',
+  REFUNDED = 'refunded',
+  PARTIALLY_REFUNDED = 'partially_refunded',
 }
 
 /**

@@ -38,7 +38,11 @@ export class RiderRequest {
   @Column({ type: 'decimal', precision: 10, scale: 2 })
   priceCeiling: string;
 
-  @Column({ type: 'enum', enum: RiderRequestStatus, default: RiderRequestStatus.QUEUED })
+  @Column({
+    type: 'enum',
+    enum: RiderRequestStatus,
+    default: RiderRequestStatus.QUEUED,
+  })
   status: RiderRequestStatus;
 
   /**

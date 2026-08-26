@@ -1,7 +1,10 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { CONFIG_DEFAULTS, Configuration } from './entities/configuration.entity';
+import {
+  CONFIG_DEFAULTS,
+  Configuration,
+} from './entities/configuration.entity';
 import {
   FARE_RATE_DEFAULTS,
   FareRateKeys,
@@ -60,13 +63,17 @@ export class ConfigurationService implements OnModuleInit {
     const perMeter = await this.repo.findOne({
       where: { key: 'fare_per_meter_etb' },
     });
-    const perKm = await this.repo.findOne({ where: { key: 'fare_per_km_etb' } });
+    const perKm = await this.repo.findOne({
+      where: { key: 'fare_per_km_etb' },
+    });
     if (!perMeter && perKm) {
       const km = Number(perKm.value);
       await this.repo.save(
         this.repo.create({
           key: 'fare_per_meter_etb',
-          value: Number.isFinite(km) ? km / 1000 : FARE_RATE_DEFAULTS[FareRateKeys.perMeterEtb],
+          value: Number.isFinite(km)
+            ? km / 1000
+            : FARE_RATE_DEFAULTS[FareRateKeys.perMeterEtb],
           description: 'ETB per meter — migrated from fare_per_km_etb / 1000',
         }),
       );
@@ -96,10 +103,22 @@ export class ConfigurationService implements OnModuleInit {
    */
   private async migrateUnrealisticFareDefaults() {
     const pairs: Array<[string, number]> = [
-      [FareRateKeys.initialFeeEtb, LEGACY_FARE_RATE_DEFAULTS[FareRateKeys.initialFeeEtb]],
-      [FareRateKeys.perMeterEtb, LEGACY_FARE_RATE_DEFAULTS[FareRateKeys.perMeterEtb]],
-      [FareRateKeys.perMinuteEtb, LEGACY_FARE_RATE_DEFAULTS[FareRateKeys.perMinuteEtb]],
-      [FareRateKeys.minimumEtb, LEGACY_FARE_RATE_DEFAULTS[FareRateKeys.minimumEtb]],
+      [
+        FareRateKeys.initialFeeEtb,
+        LEGACY_FARE_RATE_DEFAULTS[FareRateKeys.initialFeeEtb],
+      ],
+      [
+        FareRateKeys.perMeterEtb,
+        LEGACY_FARE_RATE_DEFAULTS[FareRateKeys.perMeterEtb],
+      ],
+      [
+        FareRateKeys.perMinuteEtb,
+        LEGACY_FARE_RATE_DEFAULTS[FareRateKeys.perMinuteEtb],
+      ],
+      [
+        FareRateKeys.minimumEtb,
+        LEGACY_FARE_RATE_DEFAULTS[FareRateKeys.minimumEtb],
+      ],
     ];
     const rows = await Promise.all(
       pairs.map(([key]) => this.repo.findOne({ where: { key } })),
@@ -111,8 +130,17 @@ export class ConfigurationService implements OnModuleInit {
     if (!stillLegacy) return;
 
     const updates: Array<[string, number]> = [
-      ...pairs.map(([key]) => [key, FARE_RATE_DEFAULTS[key as keyof typeof FARE_RATE_DEFAULTS]] as [string, number]),
-      [FareRateKeys.perWaitMinuteEtb, FARE_RATE_DEFAULTS[FareRateKeys.perWaitMinuteEtb]],
+      ...pairs.map(
+        ([key]) =>
+          [key, FARE_RATE_DEFAULTS[key as keyof typeof FARE_RATE_DEFAULTS]] as [
+            string,
+            number,
+          ],
+      ),
+      [
+        FareRateKeys.perWaitMinuteEtb,
+        FARE_RATE_DEFAULTS[FareRateKeys.perWaitMinuteEtb],
+      ],
     ];
     for (const [key, next] of updates) {
       await this.set(key, next, 'Addis-realistic fare default (auto-migrated)');

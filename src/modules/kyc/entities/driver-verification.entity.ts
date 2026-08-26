@@ -34,7 +34,11 @@ export class DriverVerification {
   @Column({ type: 'int' })
   vehicleYear: number;
 
-  @Column({ type: 'enum', enum: VerificationStatus, default: VerificationStatus.PENDING })
+  @Column({
+    type: 'enum',
+    enum: VerificationStatus,
+    default: VerificationStatus.PENDING,
+  })
   status: VerificationStatus;
 
   @Column({ type: 'uuid', nullable: true })
@@ -54,6 +58,25 @@ export class DriverVerification {
 
   @Column({ nullable: true })
   rejectionReason: string | null;
+
+  /** True while a replacement car is waiting on ops — current vehicle stays live. */
+  @Column({ default: false })
+  vehicleChangePending: boolean;
+
+  @Column({ nullable: true })
+  pendingVehicleMake: string | null;
+
+  @Column({ nullable: true })
+  pendingVehicleModel: string | null;
+
+  @Column({ nullable: true })
+  pendingVehiclePlate: string | null;
+
+  @Column({ nullable: true })
+  pendingVehicleColor: string | null;
+
+  @Column({ type: 'int', nullable: true })
+  pendingVehicleYear: number | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   submittedAt: Date;

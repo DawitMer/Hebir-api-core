@@ -36,11 +36,19 @@ export class DocumentSubmission {
   @Column()
   storageKey: string;
 
-  @Column({ type: 'enum', enum: DocumentReviewStatus, default: DocumentReviewStatus.QUEUED })
+  @Column({
+    type: 'enum',
+    enum: DocumentReviewStatus,
+    default: DocumentReviewStatus.QUEUED,
+  })
   status: DocumentReviewStatus;
 
   @Column({ type: 'timestamptz', nullable: true })
   expiresAt: Date | null;
+
+  /** Set when ops approves this file. Drivers cannot change it afterwards. */
+  @Column({ type: 'timestamptz', nullable: true })
+  reviewedAt: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   submittedAt: Date;

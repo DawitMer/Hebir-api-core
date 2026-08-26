@@ -60,10 +60,12 @@ export class GovService {
     @InjectRepository(Trip) private readonly trips: Repository<Trip>,
     @InjectRepository(RiderRequest)
     private readonly riderRequests: Repository<RiderRequest>,
-    @InjectRepository(UserAccount) private readonly users: Repository<UserAccount>,
+    @InjectRepository(UserAccount)
+    private readonly users: Repository<UserAccount>,
     @InjectRepository(Vehicle) private readonly vehicles: Repository<Vehicle>,
     @InjectRepository(Ride) private readonly rides: Repository<Ride>,
-    @InjectRepository(FareRecord) private readonly fares: Repository<FareRecord>,
+    @InjectRepository(FareRecord)
+    private readonly fares: Repository<FareRecord>,
     @InjectRepository(DriverVerification)
     private readonly verifications: Repository<DriverVerification>,
   ) {}
@@ -109,11 +111,7 @@ export class GovService {
     });
   }
 
-  async listDrivers(filters?: {
-    q?: string;
-    tin?: string;
-    name?: string;
-  }) {
+  async listDrivers(filters?: { q?: string; tin?: string; name?: string }) {
     const q = sanitizeSearchTerm(filters?.q ?? '');
     const tin = sanitizeSearchTerm(filters?.tin ?? '');
     const name = sanitizeSearchTerm(filters?.name ?? '');
@@ -191,9 +189,7 @@ export class GovService {
         id: d.id,
         tin: d.tin ?? null,
         fullName: d.fullName || d.phoneNumber,
-        vehicleType: vehicle
-          ? `${vehicle.make} ${vehicle.model}`.trim()
-          : '—',
+        vehicleType: vehicle ? `${vehicle.make} ${vehicle.model}`.trim() : '—',
         status:
           d.standing === AccountStanding.GOOD && approvedKyc.has(d.id)
             ? ('compliant' as const)

@@ -10,7 +10,10 @@ export class TipsController {
 
   @UseGuards(JwtAuthGuard)
   @Post()
-  createTip(@CurrentUser() user: { userId: string }, @Body() dto: CreateTipDto) {
+  createTip(
+    @CurrentUser() user: { userId: string },
+    @Body() dto: CreateTipDto,
+  ) {
     return this.tipsService.createTip(user.userId, dto);
   }
 }

@@ -40,9 +40,7 @@ export class HttpMetricsInterceptor implements NestInterceptor {
 
     const started = process.hrtime.bigint();
     const route =
-      (req.route?.path as string | undefined) ||
-      req.path ||
-      'unknown';
+      (req.route?.path as string | undefined) || req.path || 'unknown';
 
     return requestContext.run({ requestId, traceId, spanId }, () =>
       next.handle().pipe(

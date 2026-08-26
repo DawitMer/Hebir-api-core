@@ -1,9 +1,4 @@
-import {
-  angularDifference,
-  bearing,
-  haversineKm,
-  zoneIdFor,
-} from './geo.util';
+import { angularDifference, bearing, haversineKm, zoneIdFor } from './geo.util';
 
 describe('geo.util', () => {
   it('haversineKm is ~0 for identical points', () => {

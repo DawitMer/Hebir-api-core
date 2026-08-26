@@ -48,7 +48,11 @@ export class Incident {
   @Column({ type: 'text' })
   description: string;
 
-  @Column({ type: 'enum', enum: IncidentPriority, default: IncidentPriority.MEDIUM })
+  @Column({
+    type: 'enum',
+    enum: IncidentPriority,
+    default: IncidentPriority.MEDIUM,
+  })
   priority: IncidentPriority;
 
   @Column({ type: 'enum', enum: IncidentStatus, default: IncidentStatus.OPEN })

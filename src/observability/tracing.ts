@@ -9,20 +9,19 @@ export async function startTracingIfEnabled(): Promise<void> {
 
   try {
     const { NodeSDK } = await import('@opentelemetry/sdk-node');
-    const { getNodeAutoInstrumentations } = await import(
-      '@opentelemetry/auto-instrumentations-node'
-    );
-    const { OTLPTraceExporter } = await import(
-      '@opentelemetry/exporter-trace-otlp-http'
-    );
+    const { getNodeAutoInstrumentations } =
+      await import('@opentelemetry/auto-instrumentations-node');
+    const { OTLPTraceExporter } =
+      await import('@opentelemetry/exporter-trace-otlp-http');
     const { resourceFromAttributes } = await import('@opentelemetry/resources');
-    const { ATTR_SERVICE_NAME } = await import(
-      '@opentelemetry/semantic-conventions'
-    );
+    const { ATTR_SERVICE_NAME } =
+      await import('@opentelemetry/semantic-conventions');
 
     const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     const exporter = endpoint
-      ? new OTLPTraceExporter({ url: `${endpoint.replace(/\/$/, '')}/v1/traces` })
+      ? new OTLPTraceExporter({
+          url: `${endpoint.replace(/\/$/, '')}/v1/traces`,
+        })
       : undefined;
 
     const sdk = new NodeSDK({

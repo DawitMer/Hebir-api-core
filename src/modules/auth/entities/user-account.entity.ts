@@ -20,6 +20,13 @@ export enum AccountStanding {
   GOOD = 'good',
   FLAGGED = 'flagged',
   BANNED = 'banned',
+  DELETED = 'deleted',
+}
+
+export function isAccountClosed(standing: AccountStanding): boolean {
+  return (
+    standing === AccountStanding.BANNED || standing === AccountStanding.DELETED
+  );
 }
 
 @Entity('user_accounts')
@@ -30,6 +37,17 @@ export class UserAccount {
   @Index({ unique: true })
   @Column()
   phoneNumber: string;
+
+  /**
+   * Firebase Authentication UID. Nullable for legacy accounts until first Firebase login.
+   * Partial unique index ensures fast lookup and prevents duplicate Firebase UID bindings.
+   */
+  @Index({ unique: true, where: '"firebase_uid" IS NOT NULL' })
+  @Column({ name: 'firebase_uid', type: 'varchar', length: 128, nullable: true })
+  firebaseUid: string | null;
+
+  @Column({ name: 'phone_verified_at', type: 'timestamptz', nullable: true })
+  phoneVerifiedAt: Date | null;
 
   @Column({ nullable: true })
   fullName: string;
@@ -50,10 +68,19 @@ export class UserAccount {
   @Column({ nullable: true, select: false })
   passwordHash: string | null;
 
-  @Column({ type: 'enum', enum: UserRole, array: true, default: [UserRole.RIDER] })
+  @Column({
+    type: 'enum',
+    enum: UserRole,
+    array: true,
+    default: [UserRole.RIDER],
+  })
   roles: UserRole[];
 
-  @Column({ type: 'enum', enum: AccountStanding, default: AccountStanding.GOOD })
+  @Column({
+    type: 'enum',
+    enum: AccountStanding,
+    default: AccountStanding.GOOD,
+  })
   standing: AccountStanding;
 
   /** Rider/driver saved places (home/work/other) — persisted for Neon sync. */

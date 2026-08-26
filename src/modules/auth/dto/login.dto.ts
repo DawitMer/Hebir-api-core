@@ -1,10 +1,8 @@
-import { IsString, Matches } from 'class-validator';
-import { ETHIOPIA_E164 } from './register.dto';
+import { IsString } from 'class-validator';
+import { IsEthiopiaPhone } from '../../../common/phone/ethiopia-phone';
 
 export class LoginDto {
-  @Matches(ETHIOPIA_E164, {
-    message: 'phoneNumber must be +251 followed by 9 digits',
-  })
+  @IsEthiopiaPhone()
   phoneNumber: string;
 
   @IsString()

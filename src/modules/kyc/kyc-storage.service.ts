@@ -5,6 +5,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { buildKycS3Client, isCloudflareR2Endpoint } from './s3-client';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Inject } from '@nestjs/common';
 import Redis from 'ioredis';
@@ -35,8 +36,7 @@ export class KycStorageService {
     const accessKey = this.config.get<string>('S3_ACCESS_KEY_ID')?.trim();
     const secretKey = this.config.get<string>('S3_SECRET_ACCESS_KEY')?.trim();
     const forced = this.config.get<string>('KYC_STORAGE_MODE')?.trim() as
-      | KycStorageMode
-      | undefined;
+      KycStorageMode | undefined;
 
     // Its own secret: a document view link must not be forgeable by anyone who
     // learns the JWT signing key, and rotating one should not break the other.
@@ -61,21 +61,21 @@ export class KycStorageService {
       this.logger.log('KYC storage mode: local (.local-data/kyc-uploads)');
     } else {
       this.mode = 's3';
-      this.region = this.config.get<string>('S3_REGION') ?? 'us-east-1';
       const endpoint = this.config.get<string>('S3_ENDPOINT')?.trim();
-      this.s3 = new S3Client({
-        region: this.region,
-        credentials: {
-          accessKeyId: accessKey,
-          secretAccessKey: secretKey,
-        },
-        ...(endpoint ? { endpoint, forcePathStyle: true } : {}),
+      this.s3 = buildKycS3Client({
+        accessKeyId: accessKey,
+        secretAccessKey: secretKey,
+        region: this.config.get<string>('S3_REGION'),
+        endpoint,
       });
       this.logger.log(`KYC storage mode: s3 bucket=${bucket}`);
     }
 
     this.bucket = bucket ?? 'hebir-kyc-local';
-    this.region = this.config.get<string>('S3_REGION') ?? 'us-east-1';
+    const endpoint = this.config.get<string>('S3_ENDPOINT')?.trim();
+    this.region = isCloudflareR2Endpoint(endpoint)
+      ? (this.config.get<string>('S3_REGION') ?? 'auto')
+      : (this.config.get<string>('S3_REGION') ?? 'us-east-1');
     this.publicApiBase = (
       this.config.get<string>('PUBLIC_API_BASE_URL') ??
       `http://127.0.0.1:${this.config.get<number>('PORT') ?? 3000}`
@@ -144,6 +144,22 @@ export class KycStorageService {
     const sig = this.signView(storageKey, exp);
     return (
       `${this.publicApiBase}/kyc/documents/view-local` +
+      `?key=${encodeURIComponent(storageKey)}&exp=${exp}&sig=${sig}`
+    );
+  }
+
+  /**
+   * Rider/driver clients already know API_BASE_URL. Local KYC files are
+   * returned as a path so the emulator does not have to reach 127.0.0.1.
+   */
+  async createClientViewUrl(storageKey: string, expiresSeconds = 6 * 3600) {
+    if (this.mode === 's3' && this.s3) {
+      return this.createViewUrl(storageKey, expiresSeconds);
+    }
+    const exp = Math.floor(Date.now() / 1000) + expiresSeconds;
+    const sig = this.signView(storageKey, exp);
+    return (
+      `/kyc/documents/view-local` +
       `?key=${encodeURIComponent(storageKey)}&exp=${exp}&sig=${sig}`
     );
   }

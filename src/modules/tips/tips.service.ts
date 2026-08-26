@@ -10,7 +10,11 @@ import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Tip, TipStatus } from './entities/tip.entity';
 import { Ride, RideStatus } from '../rides/entities/ride.entity';
-import { PaymentRecord, PaymentStatus, PaymentType } from '../rides/entities/payment-record.entity';
+import {
+  PaymentRecord,
+  PaymentStatus,
+  PaymentType,
+} from '../rides/entities/payment-record.entity';
 import {
   DriverEarning,
   EarningSourceType,
@@ -28,7 +32,8 @@ export class TipsService {
   constructor(
     @InjectRepository(Tip) private readonly tips: Repository<Tip>,
     @InjectRepository(Ride) private readonly rides: Repository<Ride>,
-    @InjectRepository(PaymentRecord) private readonly payments: Repository<PaymentRecord>,
+    @InjectRepository(PaymentRecord)
+    private readonly payments: Repository<PaymentRecord>,
     @InjectRepository(DriverEarning)
     private readonly driverEarnings: Repository<DriverEarning>,
     private readonly config: ConfigService,
@@ -78,9 +83,9 @@ export class TipsService {
     const driverId = ride.driverId;
     const amount = String(dto.amount);
 
-    // Payment + tip + earning are atomic, and the payment stays PENDING/cash
-    // until a real PSP confirms it — no money is reported as settled without
-    // provider confirmation.
+    // Payment + tip + earning are atomic. Cash tips settle immediately —
+    // the rider handing cash to the driver *is* collection. Digital PSPs
+    // stay unwired; do not mark a Telebirr/Chapa tip succeeded here.
     const tip = await this.payments.manager.transaction(async (em) => {
       const payment = await em.save(
         em.create(PaymentRecord, {
@@ -89,8 +94,8 @@ export class TipsService {
           type: PaymentType.TIP,
           amount,
           idempotencyKey: dto.idempotencyKey,
-          status: PaymentStatus.PENDING,
-          providerReference: 'cash',
+          status: PaymentStatus.CASH_COLLECTED,
+          providerReference: `cash:tip:${ride.id}`,
           applicationFeeAmount: '0',
         }),
       );
@@ -102,8 +107,7 @@ export class TipsService {
           driverId,
           amount,
           paymentId: payment.id,
-          // Cash/PSP still pending — do not treat as settled money.
-          status: TipStatus.PENDING,
+          status: TipStatus.SUCCEEDED,
         }),
       );
 
@@ -113,7 +117,7 @@ export class TipsService {
           sourceType: EarningSourceType.TIP,
           sourceId: savedTip.id,
           amount: savedTip.amount,
-          payoutStatus: PayoutStatus.PENDING,
+          payoutStatus: PayoutStatus.PAID,
         }),
       );
 

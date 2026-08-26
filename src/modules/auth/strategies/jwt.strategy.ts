@@ -7,7 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { AuthService } from '../auth.service';
-import { AccountStanding } from '../entities/user-account.entity';
+import { isAccountClosed } from '../entities/user-account.entity';
 
 export interface JwtPayload {
   sub: string;
@@ -44,8 +44,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (!context) {
       throw new UnauthorizedException('Account no longer exists');
     }
-    if (context.standing === AccountStanding.BANNED) {
-      throw new ForbiddenException('This account has been suspended');
+    if (isAccountClosed(context.standing)) {
+      throw new ForbiddenException('This account is not available');
     }
 
     return {

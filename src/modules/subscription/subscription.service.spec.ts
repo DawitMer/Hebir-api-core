@@ -67,6 +67,7 @@ describe('SubscriptionService webhook idempotency', () => {
       configuration as never,
       notifications as never,
       envConfig as never,
+      {} as never,
       redis as never,
     );
   });
@@ -99,14 +100,12 @@ describe('SubscriptionService webhook idempotency', () => {
   });
 
   it('replays of the same event never double-activate', async () => {
-    paymentEvents.findOne
-      .mockResolvedValueOnce(null)
-      .mockResolvedValue({
-        id: 'evt-1',
-        providerReference: dto.providerReference,
-        processed: true,
-        driverId: dto.driverId,
-      });
+    paymentEvents.findOne.mockResolvedValueOnce(null).mockResolvedValue({
+      id: 'evt-1',
+      providerReference: dto.providerReference,
+      processed: true,
+      driverId: dto.driverId,
+    });
 
     const first = await service.handleConfirmedPayment(dto);
     const second = await service.handleConfirmedPayment(dto);
@@ -126,15 +125,13 @@ describe('SubscriptionService webhook idempotency', () => {
       { driverError: { code: '23505' } },
     );
 
-    paymentEvents.findOne
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        id: 'evt-raced',
-        providerReference: dto.providerReference,
-        processed: false,
-        driverId: dto.driverId,
-        amount: dto.amount,
-      });
+    paymentEvents.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      id: 'evt-raced',
+      providerReference: dto.providerReference,
+      processed: false,
+      driverId: dto.driverId,
+      amount: dto.amount,
+    });
     paymentEvents.save.mockRejectedValueOnce(uniqueErr);
 
     const result = await service.handleConfirmedPayment(dto);

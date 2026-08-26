@@ -71,8 +71,7 @@ export function localBearingAtPickup(
   destination: GeoPoint,
   pickup: GeoPoint,
 ): number {
-  const path =
-    routePath?.length >= 2 ? routePath : [start, destination];
+  const path = routePath?.length >= 2 ? routePath : [start, destination];
   let bestIdx = 0;
   let bestDist = Number.POSITIVE_INFINITY;
   for (let i = 0; i < path.length - 1; i++) {

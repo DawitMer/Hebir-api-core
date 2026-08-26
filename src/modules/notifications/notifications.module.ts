@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { AuthModule } from '../auth/auth.module';
 import { NotificationsGateway } from './notifications.gateway';
+import { PushModule } from '../push/push.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { NotificationsGateway } from './notifications.gateway';
     }),
     // Sockets enforce the same revocation/standing rules as HTTP requests.
     AuthModule,
+    PushModule,
   ],
   providers: [NotificationsGateway],
   exports: [NotificationsGateway],

@@ -35,6 +35,8 @@ export class IndexFleetScaleHotPaths1786364300000 implements MigrationInterface 
     await queryRunner.query(
       `DROP INDEX IF EXISTS "IDX_driver_subscriptions_state_driver"`,
     );
-    await queryRunner.query(`DROP INDEX IF EXISTS "IDX_driver_profiles_status"`);
+    await queryRunner.query(
+      `DROP INDEX IF EXISTS "IDX_driver_profiles_status"`,
+    );
   }
 }

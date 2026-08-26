@@ -28,4 +28,11 @@ export class UpdateLocationDto {
   @Min(0)
   @Max(120)
   speed?: number;
+
+  /** metres — omit or ignore when the GNSS chip reports an invalid value. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(2000)
+  accuracy?: number;
 }

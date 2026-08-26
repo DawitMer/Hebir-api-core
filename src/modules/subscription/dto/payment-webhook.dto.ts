@@ -1,4 +1,10 @@
-import { IsEnum, IsNumberString, IsObject, IsString, IsUUID } from 'class-validator';
+import {
+  IsEnum,
+  IsNumberString,
+  IsObject,
+  IsString,
+  IsUUID,
+} from 'class-validator';
 import { PaymentProvider } from '../entities/payment-event.entity';
 
 export class PaymentWebhookDto {

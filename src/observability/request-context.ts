@@ -13,7 +13,9 @@ export function getRequestId(): string | undefined {
   return requestContext.getStore()?.requestId;
 }
 
-export function resolveOrCreateRequestId(headerValue: string | string[] | undefined): string {
+export function resolveOrCreateRequestId(
+  headerValue: string | string[] | undefined,
+): string {
   if (typeof headerValue === 'string' && headerValue.trim()) {
     return headerValue.trim().slice(0, 128);
   }

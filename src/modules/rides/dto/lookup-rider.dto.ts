@@ -4,10 +4,9 @@ import {
   IsLongitude,
   IsNumber,
   IsObject,
-  Matches,
   ValidateNested,
 } from 'class-validator';
-import { ETHIOPIA_E164 } from '../../auth/dto/register.dto';
+import { IsEthiopiaPhone } from '../../../common/phone/ethiopia-phone';
 
 class DriverLocationDto {
   @IsNumber()
@@ -20,9 +19,7 @@ class DriverLocationDto {
 }
 
 export class LookupRiderDto {
-  @Matches(ETHIOPIA_E164, {
-    message: 'phoneNumber must be +251 followed by 9 digits',
-  })
+  @IsEthiopiaPhone()
   phoneNumber!: string;
 
   /** Driver GPS — street-hail only works within 300 m of the rider. */

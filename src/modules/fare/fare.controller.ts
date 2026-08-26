@@ -12,15 +12,17 @@ import {
 } from 'class-validator';
 import { FareService } from './fare.service';
 import { ConfigurationService } from '../subscription/configuration.service';
-import {
-  FareRateKeys,
-  FARE_RATE_DESCRIPTIONS,
-} from './fare-rates';
+import { FareRateKeys, FARE_RATE_DESCRIPTIONS } from './fare-rates';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../auth/entities/user-account.entity';
 import { zoneIdFor } from '../matching/geo/geo.util';
+import { RedisRateLimitGuard } from '../../common/rate-limit/redis-rate-limit.guard';
+import {
+  RateLimit,
+  RateLimitPresets,
+} from '../../common/rate-limit/rate-limit.decorator';
 
 class GeoPointDto {
   @IsNumber()
@@ -109,6 +111,8 @@ export class FareController {
     return this.fareService.ratesPublicView();
   }
 
+  @UseGuards(RedisRateLimitGuard)
+  @RateLimit(RateLimitPresets.fareEstimate)
   @Post('estimate')
   async estimate(@Body() dto: FareEstimateDto) {
     const durationMinutes =

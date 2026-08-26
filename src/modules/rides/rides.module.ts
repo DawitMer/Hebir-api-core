@@ -17,7 +17,9 @@ import { DriverPresenceController } from './driver-presence.controller';
 import { FareModule } from '../fare/fare.module';
 import { SubscriptionModule } from '../subscription/subscription.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { KycModule } from '../kyc/kyc.module';
 import { DispatchQueueService } from './dispatch/dispatch.queue.service';
+import { PaymentsModule } from '../payments/payments.module';
 
 @Module({
   imports: [
@@ -37,6 +39,8 @@ import { DispatchQueueService } from './dispatch/dispatch.queue.service';
     FareModule,
     SubscriptionModule,
     NotificationsModule,
+    KycModule,
+    PaymentsModule,
   ],
   controllers: [RidesController, DriverPresenceController],
   providers: [RidesService, DispatchQueueService],

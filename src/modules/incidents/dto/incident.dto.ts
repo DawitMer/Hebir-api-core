@@ -1,5 +1,16 @@
-import { IsEnum, IsNumber, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
-import { IncidentPriority, IncidentStatus, IncidentType } from '../entities/incident.entity';
+import {
+  IsEnum,
+  IsNumber,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+} from 'class-validator';
+import {
+  IncidentPriority,
+  IncidentStatus,
+  IncidentType,
+} from '../entities/incident.entity';
 
 export class CreateSosDto {
   @IsOptional()

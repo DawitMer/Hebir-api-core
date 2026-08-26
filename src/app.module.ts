@@ -42,7 +42,8 @@ import { GeocodingModule } from './common/geocoding/geocoding.module';
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
         const isProd = config.get<string>('NODE_ENV') === 'production';
-        const level = config.get<string>('LOG_LEVEL') ?? (isProd ? 'info' : 'debug');
+        const level =
+          config.get<string>('LOG_LEVEL') ?? (isProd ? 'info' : 'debug');
         return {
           pinoHttp: {
             level,
@@ -60,7 +61,10 @@ import { GeocodingModule } from './common/geocoding/geocoding.module';
               return requestId ? { requestId } : {};
             },
             transport: !isProd
-              ? { target: 'pino-pretty', options: { singleLine: true, colorize: true } }
+              ? {
+                  target: 'pino-pretty',
+                  options: { singleLine: true, colorize: true },
+                }
               : undefined,
             autoLogging: {
               ignore: (req) => {

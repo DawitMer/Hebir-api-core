@@ -8,7 +8,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Trip } from './entities/trip.entity';
-import { RiderRequest, RiderRequestStatus } from './entities/rider-request.entity';
+import {
+  RiderRequest,
+  RiderRequestStatus,
+} from './entities/rider-request.entity';
 import { Booking, BookingStatus } from '../booking/entities/booking.entity';
 import { SubmitRiderRequestDto } from './dto/submit-request.dto';
 import { PublishTripDto } from './dto/publish-trip.dto';
@@ -72,9 +75,12 @@ export class MatchingService {
    * here since this is the point of entry into the matching pool.
    */
   async publishTrip(driverId: string, dto: PublishTripDto) {
-    const mayDrive = await this.subscriptionService.mayAccessMarketplace(driverId);
+    const mayDrive =
+      await this.subscriptionService.mayAccessMarketplace(driverId);
     if (!mayDrive) {
-      throw new ForbiddenException('Active subscription required to publish a trip');
+      throw new ForbiddenException(
+        'Active subscription required to publish a trip',
+      );
     }
 
     const trip = await this.trips.save(
@@ -145,8 +151,14 @@ export class MatchingService {
         .andWhere('t."departureTime" > :cutoff', {
           cutoff: new Date(Date.now() - TRIP_DEPARTURE_GRACE_MS),
         })
-        .andWhere(`(t."startPoint"->>'lat')::float BETWEEN :minLat AND :maxLat`, bbox)
-        .andWhere(`(t."startPoint"->>'lng')::float BETWEEN :minLng AND :maxLng`, bbox)
+        .andWhere(
+          `(t."startPoint"->>'lat')::float BETWEEN :minLat AND :maxLat`,
+          bbox,
+        )
+        .andWhere(
+          `(t."startPoint"->>'lng')::float BETWEEN :minLng AND :maxLng`,
+          bbox,
+        )
         .getCount(),
     ]);
 
@@ -267,8 +279,9 @@ export class MatchingService {
       if (Number(trip.pricePerSeat) > Number(request.priceCeiling)) continue;
 
       const departureDiffMinutes =
-        Math.abs(trip.departureTime.getTime() - request.earliestDeparture.getTime()) /
-        60000;
+        Math.abs(
+          trip.departureTime.getTime() - request.earliestDeparture.getTime(),
+        ) / 60000;
       const withinWindow =
         trip.departureTime >= request.earliestDeparture &&
         trip.departureTime <= request.latestDeparture;
@@ -281,7 +294,8 @@ export class MatchingService {
         request.pickup,
         request.dropoff,
       );
-      const priceDifference = Number(request.priceCeiling) - Number(trip.pricePerSeat);
+      const priceDifference =
+        Number(request.priceCeiling) - Number(trip.pricePerSeat);
 
       const score = computeMatchScore({
         waitingMinutes,
@@ -369,14 +383,20 @@ export class MatchingService {
         },
       )
       // Driver start close enough that the rider can meet / be picked up
-      .andWhere(`(t."startPoint"->>'lat')::float BETWEEN :pMinLat AND :pMaxLat`, {
-        pMinLat: request.pickup.lat - startLatDelta,
-        pMaxLat: request.pickup.lat + startLatDelta,
-      })
-      .andWhere(`(t."startPoint"->>'lng')::float BETWEEN :pMinLng AND :pMaxLng`, {
-        pMinLng: request.pickup.lng - startLngDelta,
-        pMaxLng: request.pickup.lng + startLngDelta,
-      })
+      .andWhere(
+        `(t."startPoint"->>'lat')::float BETWEEN :pMinLat AND :pMaxLat`,
+        {
+          pMinLat: request.pickup.lat - startLatDelta,
+          pMaxLat: request.pickup.lat + startLatDelta,
+        },
+      )
+      .andWhere(
+        `(t."startPoint"->>'lng')::float BETWEEN :pMinLng AND :pMaxLng`,
+        {
+          pMinLng: request.pickup.lng - startLngDelta,
+          pMaxLng: request.pickup.lng + startLngDelta,
+        },
+      )
       .orderBy('t."departureTime"', 'ASC')
       .take(40)
       .getRawMany<{ id: string }>();

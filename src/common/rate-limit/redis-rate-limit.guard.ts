@@ -12,10 +12,7 @@ import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import Redis from 'ioredis';
 import { REDIS_CLIENT } from '../../redis/redis.module';
-import {
-  RATE_LIMIT_KEY,
-  RateLimitOptions,
-} from './rate-limit.decorator';
+import { RATE_LIMIT_KEY, RateLimitOptions } from './rate-limit.decorator';
 
 @Injectable()
 export class RedisRateLimitGuard implements CanActivate {
@@ -32,13 +29,14 @@ export class RedisRateLimitGuard implements CanActivate {
       return true;
     }
 
-    const options = this.reflector.getAllAndOverride<RateLimitOptions | undefined>(
-      RATE_LIMIT_KEY,
-      [context.getHandler(), context.getClass()],
-    );
+    const options = this.reflector.getAllAndOverride<
+      RateLimitOptions | undefined
+    >(RATE_LIMIT_KEY, [context.getHandler(), context.getClass()]);
     if (!options) return true;
 
-    const req = context.switchToHttp().getRequest<Request & { user?: { userId?: string } }>();
+    const req = context
+      .switchToHttp()
+      .getRequest<Request & { user?: { userId?: string } }>();
     const res = context.switchToHttp().getResponse<Response>();
 
     const identity = this.resolveIdentity(req, options);

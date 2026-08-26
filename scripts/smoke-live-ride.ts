@@ -46,6 +46,7 @@ async function main() {
   await axios
     .post(`${API}/subscription/dev-activate`, {}, auth(driver.token))
     .catch(() => undefined);
+  await axios.post(`${LOC}/drivers/offline`, { driverId: driver.userId }).catch(() => undefined);
   await axios.post(
     `${API}/drivers/location`,
     { lat: DRIVER_AT.lat, lng: DRIVER_AT.lng },
@@ -57,6 +58,23 @@ async function main() {
   });
   await axios.post(`${API}/drivers/presence`, { online: true }, auth(driver.token));
   console.log('driver online + located');
+
+  const activeRide = await axios.get(`${API}/rides/active`, auth(rider.token)).catch(() => undefined);
+  if (activeRide?.data?.id) {
+    if (activeRide.data.status === 'in_progress') {
+      await axios.post(`${LOC}/drivers/location`, {
+        driverId: driver.userId,
+        location: activeRide.data.dropoff || DROPOFF,
+      }).catch(() => undefined);
+      await axios.post(`${API}/rides/${activeRide.data.id}/complete`, {}, auth(driver.token)).catch(() => undefined);
+      await axios.post(`${LOC}/drivers/location`, {
+        driverId: driver.userId,
+        location: DRIVER_AT,
+      }).catch(() => undefined);
+    } else {
+      await axios.patch(`${API}/rides/${activeRide.data.id}/status`, { status: 'cancelled' }, auth(rider.token)).catch(() => undefined);
+    }
+  }
 
   const { data: ride } = await axios.post(
     `${API}/rides`,
@@ -101,6 +119,12 @@ async function main() {
     );
     console.log(`transition -> ${data.status}`);
   }
+
+  await axios.post(`${LOC}/drivers/offline`, { driverId: driver.userId });
+  await axios.post(`${LOC}/drivers/location`, {
+    driverId: driver.userId,
+    location: DROPOFF,
+  });
 
   const { data: done } = await axios.post(
     `${API}/rides/${ride.id}/complete`,

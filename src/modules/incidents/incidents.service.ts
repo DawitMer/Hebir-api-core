@@ -14,7 +14,11 @@ import {
   IncidentStatus,
   IncidentType,
 } from './entities/incident.entity';
-import { CreateIncidentDto, CreateSosDto, UpdateIncidentStatusDto } from './dto/incident.dto';
+import {
+  CreateIncidentDto,
+  CreateSosDto,
+  UpdateIncidentStatusDto,
+} from './dto/incident.dto';
 import { UserAccount } from '../auth/entities/user-account.entity';
 import { Ride } from '../rides/entities/ride.entity';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
@@ -25,18 +29,16 @@ export class IncidentsService {
   private readonly logger = new Logger(IncidentsService.name);
 
   constructor(
-    @InjectRepository(Incident) private readonly incidents: Repository<Incident>,
-    @InjectRepository(UserAccount) private readonly users: Repository<UserAccount>,
+    @InjectRepository(Incident)
+    private readonly incidents: Repository<Incident>,
+    @InjectRepository(UserAccount)
+    private readonly users: Repository<UserAccount>,
     @InjectRepository(Ride) private readonly rides: Repository<Ride>,
     private readonly notifications: NotificationsGateway,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {}
 
-  async createSos(
-    reporterId: string,
-    reporterRole: string,
-    dto: CreateSosDto,
-  ) {
+  async createSos(reporterId: string, reporterRole: string, dto: CreateSosDto) {
     const reporter = await this.users.findOne({ where: { id: reporterId } });
     // Only a participant may attach a ride, otherwise anyone could file an
     // incident against someone else's trip and pull it into the ops queue.
@@ -242,8 +244,7 @@ export class IncidentsService {
     incident.status = dto.status;
     if (dto.status === IncidentStatus.ASSIGNED) {
       incident.assignedToId = actorId;
-      incident.assignedToName =
-        dto.assignedToName || actorName || 'Ops agent';
+      incident.assignedToName = dto.assignedToName || actorName || 'Ops agent';
       incident.assignedAt = new Date();
       incident.resolvedAt = null;
     } else if (dto.status === IncidentStatus.RESOLVED) {
@@ -278,7 +279,8 @@ export class IncidentsService {
       title: incident.title,
       description: incident.description,
       priority: incident.priority,
-      relatedId: incident.rideId || incident.relatedUserId || incident.reporterId,
+      relatedId:
+        incident.rideId || incident.relatedUserId || incident.reporterId,
       relatedName: incident.relatedName || incident.caseNumber,
       reportedAt: incident.reportedAt.toISOString(),
       status: incident.status,

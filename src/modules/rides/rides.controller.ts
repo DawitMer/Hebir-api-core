@@ -18,6 +18,8 @@ import { LookupRiderDto } from './dto/lookup-rider.dto';
 import { DriverInitiatedRideDto } from './dto/driver-initiated-ride.dto';
 import { StartRideDto } from './dto/start-ride.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RedisRateLimitGuard } from '../../common/rate-limit/redis-rate-limit.guard';
 import {
@@ -40,7 +42,8 @@ export class RidesController {
   }
 
   /** Exact phone lookup for street-hail / "join my phone" trips. */
-  @UseGuards(JwtAuthGuard, RedisRateLimitGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)
+  @Roles(UserRole.DRIVER)
   @RateLimit({
     prefix: 'rl:rider-lookup',
     limit: 20,
@@ -57,7 +60,8 @@ export class RidesController {
   }
 
   /** Driver creates an assigned ride; rider gets a privacy start code. */
-  @UseGuards(JwtAuthGuard, RedisRateLimitGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)
+  @Roles(UserRole.DRIVER)
   @RateLimit(RateLimitPresets.rideRequest)
   @Post('driver-initiated')
   driverInitiated(
@@ -68,24 +72,32 @@ export class RidesController {
   }
 
   /** Current live offer for this driver (one-shot reconnect catch-up). */
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.DRIVER)
   @Get('offers/current')
   getCurrentOffer(@CurrentUser() user: AuthedUser) {
     return this.ridesService.getCurrentOffer(user.userId);
   }
 
-  /** Driver's live assigned trip (resume after app kill / leave mid-trip). */
+  /** Live trip for this user (resume after app kill / leave mid-trip). */
   @UseGuards(JwtAuthGuard)
   @Get('active')
   async getActive(@CurrentUser() user: AuthedUser) {
     return (
-      (await this.ridesService.getActiveRideForDriver(user.userId)) ?? {}
+      (await this.ridesService.getActiveRideForUser(
+        user.userId,
+        user.roles ?? [],
+      )) ?? {}
     );
   }
 
   @UseGuards(JwtAuthGuard)
   @Get('mine')
   listMine(@CurrentUser() user: AuthedUser, @Query() query: ListRidesDto) {
+    const isDriver = (user.roles ?? []).includes(UserRole.DRIVER);
+    if (isDriver) {
+      return this.ridesService.listRidesForDriver(user.userId, query.limit);
+    }
     return this.ridesService.listRidesForRider(user.userId, query.limit);
   }
 
@@ -99,7 +111,7 @@ export class RidesController {
   }
 
   @UseGuards(JwtAuthGuard, RedisRateLimitGuard)
-  @RateLimit(RateLimitPresets.rideRequest)
+  @RateLimit(RateLimitPresets.chat)
   @Post(':id/messages')
   sendMessage(
     @CurrentUser() user: AuthedUser,
@@ -109,7 +121,9 @@ export class RidesController {
     return this.ridesService.sendRideMessage(id, user.userId, dto.body);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)
+  @Roles(UserRole.DRIVER)
+  @RateLimit(RateLimitPresets.rideMutate)
   @Post(':id/start')
   startWithCode(
     @CurrentUser() user: AuthedUser,
@@ -117,6 +131,15 @@ export class RidesController {
     @Body() dto: StartRideDto,
   ) {
     return this.ridesService.startRideWithCode(id, user.userId, dto.startCode);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get(':id/driver-location')
+  getDriverLocation(
+    @CurrentUser() user: AuthedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.ridesService.getAssignedDriverLocation(id, user);
   }
 
   @UseGuards(JwtAuthGuard)
@@ -128,7 +151,9 @@ export class RidesController {
     return this.ridesService.getRide(id, user);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)
+  @Roles(UserRole.DRIVER)
+  @RateLimit(RateLimitPresets.rideMutate)
   @Post(':id/accept')
   accept(
     @CurrentUser() user: AuthedUser,
@@ -137,7 +162,9 @@ export class RidesController {
     return this.ridesService.acceptOffer(user.userId, id);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)
+  @Roles(UserRole.DRIVER)
+  @RateLimit(RateLimitPresets.rideMutate)
   @Post(':id/decline')
   decline(
     @CurrentUser() user: AuthedUser,
@@ -146,7 +173,8 @@ export class RidesController {
     return this.ridesService.declineOffer(user.userId, id);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RedisRateLimitGuard)
+  @RateLimit(RateLimitPresets.rideMutate)
   @Patch(':id/status')
   transition(
     @CurrentUser() user: AuthedUser,
@@ -161,7 +189,9 @@ export class RidesController {
     );
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)
+  @Roles(UserRole.DRIVER)
+  @RateLimit(RateLimitPresets.rideMutate)
   @Post(':id/complete')
   complete(
     @CurrentUser() user: AuthedUser,

@@ -12,7 +12,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import Redis from 'ioredis';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -33,6 +33,33 @@ import {
 } from '../../common/rate-limit/rate-limit.decorator';
 import { LocationSvcClient } from '../../common/location-svc/location-svc.client';
 import { SubscriptionService } from '../subscription/subscription.service';
+import { NotificationsGateway } from '../notifications/notifications.gateway';
+import { Ride, RideStatus } from '../rides/entities/ride.entity';
+import {
+  liveTrackFromRide,
+  liveTrackKey,
+  parseLiveTrack,
+  writeLiveTrack,
+  LIVE_TRACK_TTL_SEC,
+} from '../rides/ride-live-track';
+import { remainingEta } from '../rides/remaining-eta';
+
+const TRACKABLE_RIDE_STATUSES = [
+  RideStatus.MATCHED,
+  RideStatus.ACCEPTED,
+  RideStatus.ARRIVING,
+  RideStatus.IN_PROGRESS,
+];
+
+type GeoPingResult = {
+  accepted?: boolean;
+  lat?: number;
+  lng?: number;
+  heading?: number | null;
+  speed?: number | null;
+  accuracy?: number | null;
+  timestampMs?: number;
+};
 
 /**
  * Thin authenticated proxy so Flutter apps talk only to api-core.
@@ -59,6 +86,8 @@ export class LocationController {
     private readonly history: Repository<DriverLocationHistory>,
     @InjectRepository(DriverProfile)
     private readonly driverProfiles: Repository<DriverProfile>,
+    @InjectRepository(Ride) private readonly rides: Repository<Ride>,
+    private readonly notifications: NotificationsGateway,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {
     this.historyFlushSeconds = Number(
@@ -117,14 +146,23 @@ export class LocationController {
     // breaker is open), the driver is NOT in the dispatch index and the
     // client should know.
     let indexed = false;
+    let geoAccepted = false;
+    let ping: GeoPingResult | null = null;
     if (this.locationSvc.enabled && !this.locationSvc.isOpen) {
       try {
         if (indexInGeo) {
-          await this.locationSvc.post('/drivers/location', {
-            driverId: user.userId,
-            location: { lat: body.lat, lng: body.lng },
-          });
-          indexed = true;
+          ping = await this.locationSvc.post<GeoPingResult>(
+            '/drivers/location',
+            {
+              driverId: user.userId,
+              location: { lat: body.lat, lng: body.lng },
+              heading: body.heading,
+              speed: body.speed,
+              accuracy: body.accuracy,
+            },
+          );
+          geoAccepted = ping?.accepted !== false;
+          indexed = geoAccepted;
         } else {
           await this.locationSvc.post(
             '/drivers/offline',
@@ -139,32 +177,98 @@ export class LocationController {
       }
     }
 
-    // Batch-flush to Postgres for history (never every ping).
-    const throttleKey = `driver:loc:flush:${user.userId}`;
-    const acquired = await this.redis.set(
-      throttleKey,
-      '1',
-      'EX',
-      this.historyFlushSeconds,
-      'NX',
-    );
-    if (acquired === 'OK') {
-      try {
-        await this.history.save(
-          this.history.create({
-            driverId: user.userId,
-            lat: body.lat,
-            lng: body.lng,
-            heading: body.heading ?? null,
-            speed: body.speed ?? null,
-          }),
-        );
-      } catch (error) {
-        this.logger.warn(`Location history flush failed: ${error.message}`);
+    if (geoAccepted && status === DriverStatus.ON_TRIP) {
+      void this.broadcastAssignedLocation(user.userId, body, ping);
+    }
+
+    // Batch-flush to Postgres for history (never every ping). Skip rejected
+    // jumps so forensic history matches what dispatch and the rider map saw.
+    if (ping?.accepted !== false) {
+      const throttleKey = `driver:loc:flush:${user.userId}`;
+      const acquired = await this.redis.set(
+        throttleKey,
+        '1',
+        'EX',
+        this.historyFlushSeconds,
+        'NX',
+      );
+      if (acquired === 'OK') {
+        try {
+          await this.history.save(
+            this.history.create({
+              driverId: user.userId,
+              lat: body.lat,
+              lng: body.lng,
+              heading: body.heading ?? null,
+              speed: body.speed ?? null,
+            }),
+          );
+        } catch (error) {
+          this.logger.warn(`Location history flush failed: ${error.message}`);
+        }
       }
     }
 
     return { ok: true, indexed };
+  }
+
+  /**
+   * Push the assigned car to the rider only. Fleet nearby polls still exist
+   * for the home map; in-trip tracking must not depend on GEO radius/limit.
+   */
+  private async broadcastAssignedLocation(
+    driverId: string,
+    body: UpdateLocationDto,
+    ping: GeoPingResult | null,
+  ): Promise<void> {
+    try {
+      let track = parseLiveTrack(await this.redis.get(liveTrackKey(driverId)));
+      if (!track || !track.pickup || !track.dropoff) {
+        const ride = await this.rides.findOne({
+          where: { driverId, status: In(TRACKABLE_RIDE_STATUSES) },
+          order: { matchedAt: 'DESC' },
+        });
+        if (!ride) return;
+        track = liveTrackFromRide(ride);
+        await writeLiveTrack(this.redis, driverId, track);
+      } else {
+        await this.redis.expire(liveTrackKey(driverId), LIVE_TRACK_TTL_SEC);
+      }
+
+      const lat = ping?.lat ?? body.lat;
+      const lng = ping?.lng ?? body.lng;
+      const timestampMs = ping?.timestampMs ?? Date.now();
+      const eta =
+        track.pickup && track.dropoff
+          ? remainingEta({
+              driver: { lat, lng },
+              speedMps: ping?.speed ?? body.speed,
+              pickup: track.pickup,
+              dropoff: track.dropoff,
+              status: track.status ?? RideStatus.ACCEPTED,
+              quotedDistanceM: track.distanceM,
+              quotedDurationS: track.durationS,
+            })
+          : null;
+      await this.notifications.notify(track.riderId, 'ride.driver_location', {
+        rideId: track.rideId,
+        driverId,
+        lat,
+        lng,
+        heading: ping?.heading ?? body.heading ?? null,
+        speed: ping?.speed ?? body.speed ?? null,
+        accuracy: ping?.accuracy ?? body.accuracy ?? null,
+        timestampMs,
+        seq: timestampMs,
+        remainingMetres: eta?.remainingMetres ?? null,
+        etaSeconds: eta?.etaSeconds ?? null,
+        etaTarget: eta?.target ?? null,
+      });
+    } catch (error) {
+      this.logger.warn(
+        `driver location push failed: ${(error as Error).message}`,
+      );
+    }
   }
 
   /**
@@ -208,13 +312,18 @@ export class LocationController {
       maxLng: Number(maxLng),
     };
     if (
-      ![bbox.minLat, bbox.minLng, bbox.maxLat, bbox.maxLng].every(Number.isFinite) ||
+      ![bbox.minLat, bbox.minLng, bbox.maxLat, bbox.maxLng].every(
+        Number.isFinite,
+      ) ||
       bbox.minLat >= bbox.maxLat ||
       bbox.minLng >= bbox.maxLng
     ) {
       throw new BadRequestException(
         'minLat, minLng, maxLat, maxLng are required and must form a valid bbox',
       );
+    }
+    if (bbox.maxLat - bbox.minLat > 1 || bbox.maxLng - bbox.minLng > 1) {
+      throw new BadRequestException('Bounding box is too large');
     }
     return this.locationSvc.get('/demand/grid', bbox, 2500);
   }
@@ -238,8 +347,12 @@ export class LocationController {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       throw new BadRequestException('lat and lng query params are required');
     }
-    const radiusKm = Number(radiusRaw);
-    const limit = Number(limitRaw);
+    const radiusKm = Number.isFinite(Number(radiusRaw))
+      ? Math.min(25, Math.max(0.5, Number(radiusRaw)))
+      : 4;
+    const limit = Number.isFinite(Number(limitRaw))
+      ? Math.min(48, Math.max(1, Math.floor(Number(limitRaw))))
+      : 24;
     if (!this.locationSvc.enabled || this.locationSvc.isOpen) {
       throw new ServiceUnavailableException('location-svc unavailable');
     }
@@ -248,8 +361,8 @@ export class LocationController {
       {
         lat,
         lng,
-        radiusKm: Number.isFinite(radiusKm) ? radiusKm : 4,
-        limit: Number.isFinite(limit) ? limit : 24,
+        radiusKm,
+        limit,
       },
       2500,
     );

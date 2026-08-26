@@ -4,10 +4,7 @@ import {
 } from '@aws-sdk/client-secrets-manager';
 import * as fs from 'fs';
 import * as path from 'path';
-import {
-  SECRET_ENV_KEYS,
-  SecretsBackend,
-} from './secrets.types';
+import { SECRET_ENV_KEYS, SecretsBackend } from './secrets.types';
 
 function resolveBackend(): SecretsBackend {
   const explicit = process.env.SECRETS_BACKEND?.trim().toLowerCase();
@@ -43,7 +40,11 @@ export function applySecrets(
   for (const [key, raw] of Object.entries(secrets)) {
     if (!key || raw === undefined || raw === null) continue;
     const value = typeof raw === 'string' ? raw : String(raw);
-    if (!overwrite && process.env[key] !== undefined && process.env[key] !== '') {
+    if (
+      !overwrite &&
+      process.env[key] !== undefined &&
+      process.env[key] !== ''
+    ) {
       continue;
     }
     process.env[key] = value;
@@ -75,7 +76,9 @@ async function loadFromAws(): Promise<Record<string, unknown>> {
 
   const text = out.SecretString;
   if (!text) {
-    throw new Error(`[secrets] Secret ${secretId} has no SecretString (binary secrets unsupported)`);
+    throw new Error(
+      `[secrets] Secret ${secretId} has no SecretString (binary secrets unsupported)`,
+    );
   }
 
   try {

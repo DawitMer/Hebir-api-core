@@ -10,7 +10,10 @@ import { EntityManager, LessThanOrEqual, Repository } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Booking, BookingStatus } from './entities/booking.entity';
 import { Trip } from '../matching/entities/trip.entity';
-import { RiderRequest, RiderRequestStatus } from '../matching/entities/rider-request.entity';
+import {
+  RiderRequest,
+  RiderRequestStatus,
+} from '../matching/entities/rider-request.entity';
 import { SelectMatchDto } from './dto/select-match.dto';
 import { ConfigurationService } from '../subscription/configuration.service';
 import { FareService } from '../fare/fare.service';
@@ -57,7 +60,9 @@ export class BookingService {
       throw new NotFoundException('Rider request not found');
     }
 
-    const holdMinutes = this.configuration.get<number>('seat_hold_duration_minutes');
+    const holdMinutes = this.configuration.get<number>(
+      'seat_hold_duration_minutes',
+    );
     const holdExpiresAt = new Date(Date.now() + holdMinutes * 60 * 1000);
 
     const { distanceKm, durationMinutes } = this.fareService.quotedTripMetrics(
@@ -119,7 +124,11 @@ export class BookingService {
    * guarantee — it holds even if Redis is completely unavailable and no
    * holds exist at all (blueprint 7.2).
    */
-  async driverRespond(driverId: string, bookingId: string, decision: DriverDecision) {
+  async driverRespond(
+    driverId: string,
+    bookingId: string,
+    decision: DriverDecision,
+  ) {
     const booking = await this.bookings.findOne({ where: { id: bookingId } });
     if (!booking) throw new NotFoundException('Booking not found');
 
@@ -132,8 +141,13 @@ export class BookingService {
       throw new ForbiddenException('You do not own this trip');
     }
 
-    if (booking.status !== BookingStatus.HELD || booking.holdExpiresAt <= new Date()) {
-      throw new ConflictException('This hold has already lapsed or been resolved');
+    if (
+      booking.status !== BookingStatus.HELD ||
+      booking.holdExpiresAt <= new Date()
+    ) {
+      throw new ConflictException(
+        'This hold has already lapsed or been resolved',
+      );
     }
 
     if (decision === 'decline') {
@@ -163,12 +177,16 @@ export class BookingService {
       { status: BookingStatus.DECLINED },
     );
     if (!declined.affected) {
-      throw new ConflictException('This hold has already lapsed or been resolved');
+      throw new ConflictException(
+        'This hold has already lapsed or been resolved',
+      );
     }
     await this.notifyRider(booking, 'booking.declined');
     // The rider's original queuedAt is untouched — a decline never costs
     // the rider their place in the queue (blueprint 7.3).
-    return (await this.bookings.findOne({ where: { id: booking.id } })) ?? booking;
+    return (
+      (await this.bookings.findOne({ where: { id: booking.id } })) ?? booking
+    );
   }
 
   private async confirm(booking: Booking, trip: Trip) {
@@ -183,7 +201,9 @@ export class BookingService {
         { status: BookingStatus.CONFIRMED, driverConfirmed: true },
       );
       if (!claimed.affected) {
-        throw new ConflictException('This hold has already lapsed or been resolved');
+        throw new ConflictException(
+          'This hold has already lapsed or been resolved',
+        );
       }
 
       // Atomic, conditional decrement — the single guarantee that makes
@@ -201,7 +221,9 @@ export class BookingService {
 
       if (result.affected === 0) {
         this.metrics.seatConflictTotal.inc();
-        throw new ConflictException('Seats were taken by another booking first');
+        throw new ConflictException(
+          'Seats were taken by another booking first',
+        );
       }
 
       await em.update(RiderRequest, booking.riderRequestId, {
@@ -269,15 +291,23 @@ export class BookingService {
     // Single conditional UPDATE — cannot overwrite a booking that a driver
     // confirmed between read and write.
     const expired = await this.bookings.update(
-      { status: BookingStatus.HELD, holdExpiresAt: LessThanOrEqual(new Date()) },
+      {
+        status: BookingStatus.HELD,
+        holdExpiresAt: LessThanOrEqual(new Date()),
+      },
       { status: BookingStatus.EXPIRED },
     );
     if (expired.affected) {
-      this.logger.log(`${expired.affected} booking hold(s) expired without a response`);
+      this.logger.log(
+        `${expired.affected} booking hold(s) expired without a response`,
+      );
     }
   }
 
-  private async sumHeldSeats(tripId: string, em?: EntityManager): Promise<number> {
+  private async sumHeldSeats(
+    tripId: string,
+    em?: EntityManager,
+  ): Promise<number> {
     const repo = em ? em.getRepository(Booking) : this.bookings;
     const held = await repo.find({
       where: { tripId, status: BookingStatus.HELD },

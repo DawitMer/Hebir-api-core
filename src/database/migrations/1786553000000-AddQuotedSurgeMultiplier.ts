@@ -5,9 +5,7 @@ import { bootstrappedFromBaseline } from '../migration-utils';
  * Persist the surge the rider was quoted so driver offers and completion
  * charge the same amount when demand is high.
  */
-export class AddQuotedSurgeMultiplier1786553000000
-  implements MigrationInterface
-{
+export class AddQuotedSurgeMultiplier1786553000000 implements MigrationInterface {
   name = 'AddQuotedSurgeMultiplier1786553000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

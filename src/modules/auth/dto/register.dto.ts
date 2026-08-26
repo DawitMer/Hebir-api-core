@@ -5,14 +5,16 @@ import {
   IsIn,
   IsOptional,
   IsString,
-  Matches,
   MaxLength,
   MinLength,
 } from 'class-validator';
 import { UserRole } from '../entities/user-account.entity';
+import {
+  ETHIOPIA_E164,
+  IsEthiopiaPhone,
+} from '../../../common/phone/ethiopia-phone';
 
-/** Ethiopia E.164: +251 + 9 digits (demo-friendly; libphonenumber ET is too strict). */
-export const ETHIOPIA_E164 = /^\+251\d{9}$/;
+export { ETHIOPIA_E164 };
 
 /**
  * Roles a caller may ask for on public signup. `admin` and `gov_officer` are
@@ -22,9 +24,7 @@ export const ETHIOPIA_E164 = /^\+251\d{9}$/;
 export const SELF_SERVICE_ROLES: UserRole[] = [UserRole.RIDER, UserRole.DRIVER];
 
 export class RegisterDto {
-  @Matches(ETHIOPIA_E164, {
-    message: 'phoneNumber must be +251 followed by 9 digits',
-  })
+  @IsEthiopiaPhone()
   phoneNumber: string;
 
   /** Optional — rider/driver are passwordless (OTP). Staff are seeded with a hash. */

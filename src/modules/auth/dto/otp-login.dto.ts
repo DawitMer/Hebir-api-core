@@ -9,13 +9,12 @@ import {
   MaxLength,
 } from 'class-validator';
 import { UserRole } from '../entities/user-account.entity';
-import { ETHIOPIA_E164, SELF_SERVICE_ROLES } from './register.dto';
+import { SELF_SERVICE_ROLES } from './register.dto';
+import { IsEthiopiaPhone } from '../../../common/phone/ethiopia-phone';
 
 /** Phone + OTP code → session tokens (passwordless rider/driver auth). */
 export class OtpLoginDto {
-  @Matches(ETHIOPIA_E164, {
-    message: 'phoneNumber must be +251 followed by 9 digits',
-  })
+  @IsEthiopiaPhone()
   phoneNumber!: string;
 
   @IsString()

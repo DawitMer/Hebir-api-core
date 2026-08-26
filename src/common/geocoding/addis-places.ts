@@ -12,11 +12,31 @@ export interface AddisPlace {
 
 export const ADDIS_PLACES: readonly AddisPlace[] = [
   // Bole
-  { name: 'Bole International Airport', subCity: 'Bole', lat: 8.9779, lng: 38.7993 },
+  {
+    name: 'Bole International Airport',
+    subCity: 'Bole',
+    lat: 8.9779,
+    lng: 38.7993,
+  },
   { name: 'Edna Mall', subCity: 'Bole', lat: 8.9975, lng: 38.789 },
-  { name: 'Bole Medhanialem Church', subCity: 'Bole', lat: 8.996, lng: 38.7865 },
-  { name: 'Bole Road (Africa Avenue)', subCity: 'Bole', lat: 8.9903, lng: 38.7876 },
-  { name: 'Friendship Business Center', subCity: 'Bole', lat: 8.9938, lng: 38.7842 },
+  {
+    name: 'Bole Medhanialem Church',
+    subCity: 'Bole',
+    lat: 8.996,
+    lng: 38.7865,
+  },
+  {
+    name: 'Bole Road (Africa Avenue)',
+    subCity: 'Bole',
+    lat: 8.9903,
+    lng: 38.7876,
+  },
+  {
+    name: 'Friendship Business Center',
+    subCity: 'Bole',
+    lat: 8.9938,
+    lng: 38.7842,
+  },
   { name: 'Atlas Roundabout', subCity: 'Bole', lat: 9.0015, lng: 38.7847 },
   { name: 'Wollo Sefer', subCity: 'Bole', lat: 9.0009, lng: 38.7683 },
   { name: 'Gerji', subCity: 'Bole', lat: 9.0072, lng: 38.8121 },
@@ -54,7 +74,12 @@ export const ADDIS_PLACES: readonly AddisPlace[] = [
 
   // Nifas Silk-Lafto / Akaki
   { name: 'Sarbet', subCity: 'Nifas Silk-Lafto', lat: 8.9932, lng: 38.7501 },
-  { name: 'Old Airport', subCity: 'Nifas Silk-Lafto', lat: 8.9862, lng: 38.7414 },
+  {
+    name: 'Old Airport',
+    subCity: 'Nifas Silk-Lafto',
+    lat: 8.9862,
+    lng: 38.7414,
+  },
   { name: 'Jemo', subCity: 'Nifas Silk-Lafto', lat: 8.9509, lng: 38.7095 },
   { name: 'Lebu', subCity: 'Nifas Silk-Lafto', lat: 8.9455, lng: 38.7247 },
   { name: 'Kality', subCity: 'Akaki Kality', lat: 8.9152, lng: 38.7688 },

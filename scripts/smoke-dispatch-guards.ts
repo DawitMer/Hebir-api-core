@@ -14,9 +14,9 @@ import { loginWithOtp } from './lib/otp-login';
 const API = process.env.API_URL ?? 'http://127.0.0.1:3000';
 const LOC = process.env.LOCATION_SVC_URL ?? 'http://127.0.0.1:8090';
 
-const DRIVER_PHONE = process.env.DRIVER_PHONE ?? '+251911200002';
-const RIDER_PHONE = process.env.RIDER_PHONE ?? '+251922300002';
-const OTHER_RIDER_PHONE = process.env.OTHER_RIDER_PHONE ?? '+251922300003';
+const DRIVER_PHONE = process.env.DRIVER_PHONE ?? '+251911200001';
+const RIDER_PHONE = process.env.RIDER_PHONE ?? '+251922300001';
+const OTHER_RIDER_PHONE = process.env.OTHER_RIDER_PHONE ?? '+251922300002';
 
 const DRIVER_AT = { lat: 8.9878, lng: 38.791 };
 const PICKUP = { lat: 8.9865, lng: 38.7896 };
@@ -58,6 +58,7 @@ async function goOnline(driver: { token: string; userId: string }) {
   await axios
     .post(`${API}/subscription/dev-activate`, {}, auth(driver.token))
     .catch(() => undefined);
+  await axios.post(`${LOC}/drivers/offline`, { driverId: driver.userId }).catch(() => undefined);
   await axios.post(`${LOC}/drivers/location`, {
     driverId: driver.userId,
     location: DRIVER_AT,
@@ -88,16 +89,39 @@ async function presenceStatus(driverToken: string) {
   return data?.profile?.status as string | undefined;
 }
 
-async function cleanup(riderToken: string, rideId: string) {
-  await axios
-    .patch(`${API}/rides/${rideId}/status`, { status: 'cancelled' }, auth(riderToken))
-    .catch(() => undefined);
+async function cleanup(driver: { token: string; userId: string }, riderToken: string, ride: any) {
+  if (!ride?.id) return;
+  if (ride.status === 'in_progress') {
+    await axios.post(`${LOC}/drivers/location`, {
+      driverId: driver.userId,
+      location: ride.dropoff || DROPOFF,
+    }).catch(() => undefined);
+    await axios
+      .post(`${API}/rides/${ride.id}/complete`, {}, auth(driver.token))
+      .catch(() => undefined);
+    await axios.post(`${LOC}/drivers/location`, {
+      driverId: driver.userId,
+      location: DRIVER_AT,
+    }).catch(() => undefined);
+  } else {
+    await axios
+      .patch(`${API}/rides/${ride.id}/status`, { status: 'cancelled' }, auth(riderToken))
+      .catch(() => undefined);
+  }
 }
 
 async function main() {
   const driver = await login(DRIVER_PHONE, ['driver']);
   const rider = await login(RIDER_PHONE, ['rider']);
   const other = await login(OTHER_RIDER_PHONE, ['rider']);
+  const activeRide = await axios.get(`${API}/rides/active`, auth(rider.token)).catch(() => undefined);
+  if (activeRide?.data?.id) {
+    await cleanup(driver, rider.token, activeRide.data);
+  }
+  const otherActive = await axios.get(`${API}/rides/active`, auth(other.token)).catch(() => undefined);
+  if (otherActive?.data?.id) {
+    await cleanup(driver, other.token, otherActive.data);
+  }
   await goOnline(driver);
 
   console.log('\n--- input validation ---');
@@ -163,6 +187,11 @@ async function main() {
     for (const status of ['arriving', 'in_progress']) {
       await axios.patch(`${API}/rides/${ride.id}/status`, { status }, auth(driver.token));
     }
+    await axios.post(`${LOC}/drivers/offline`, { driverId: driver.userId });
+    await axios.post(`${LOC}/drivers/location`, {
+      driverId: driver.userId,
+      location: DROPOFF,
+    });
     const done = await axios.post(`${API}/rides/${ride.id}/complete`, {}, auth(driver.token));
     check('ride completed', done.data?.status === 'completed', done.data?.status);
     // completeRide() is deliberately idempotent (End Trip can be tapped twice /
@@ -180,6 +209,10 @@ async function main() {
   }
 
   console.log('\n--- timed-out offer frees the driver ---');
+  await axios.post(`${LOC}/drivers/location`, {
+    driverId: driver.userId,
+    location: DRIVER_AT,
+  });
   const ignored = await requestRide(rider.token);
   const secondOffer = await waitForOffer(driver.token);
   check('driver offered again', Boolean(secondOffer?.id));
@@ -194,7 +227,7 @@ async function main() {
     }
     check('driver released from reserved after offer timeout', released);
   }
-  await cleanup(rider.token, ignored.id);
+  await cleanup(driver, rider.token, ignored);
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);

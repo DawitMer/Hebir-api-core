@@ -1,4 +1,9 @@
-import { Controller, Get, Inject, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Inject,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import Redis from 'ioredis';
@@ -14,7 +19,7 @@ export class HealthController {
   ) {}
 
   /** Liveness: the process is up. Never checks dependencies. */
-  @Get('healthz')
+  @Get(['healthz', 'health'])
   healthz() {
     return {
       ok: true,
@@ -28,7 +33,7 @@ export class HealthController {
    * location-svc state (soft — dispatch has a DB fallback). Returns 503
    * when a hard dependency is down so orchestrators stop routing traffic.
    */
-  @Get('readyz')
+  @Get(['readyz', 'ready'])
   async readyz() {
     const checks = {
       postgres: false,

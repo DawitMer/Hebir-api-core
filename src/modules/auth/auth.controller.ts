@@ -5,6 +5,7 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { LoginMfaDto } from './dto/login-mfa.dto';
 import { OtpLoginDto } from './dto/otp-login.dto';
+import { FirebaseLoginDto } from './dto/firebase-login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -21,6 +22,14 @@ export class AuthController {
     private readonly otpService: OtpService,
   ) {}
 
+  /** Passwordless sign-in for rider & driver apps via Firebase Phone Auth. */
+  @UseGuards(RedisRateLimitGuard)
+  @RateLimit(RateLimitPresets.auth)
+  @Post('firebase/login')
+  loginWithFirebase(@Body() dto: FirebaseLoginDto) {
+    return this.authService.loginWithFirebase(dto);
+  }
+
   @UseGuards(RedisRateLimitGuard)
   @RateLimit(RateLimitPresets.auth)
   @Post('otp/request')
@@ -35,7 +44,7 @@ export class AuthController {
     return this.otpService.verify(dto.phoneNumber, dto.code);
   }
 
-  /** Passwordless login/signup for rider & driver apps. */
+  /** Passwordless login/signup for rider & driver apps (legacy / fallback). */
   @UseGuards(RedisRateLimitGuard)
   @RateLimit(RateLimitPresets.auth)
   @Post('otp/login')

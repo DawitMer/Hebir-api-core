@@ -61,6 +61,8 @@ function loadEnvFile() {
   }
 }
 
+loadEnvFile();
+
 function nameAt(i: number) {
   return `${FIRST[i % FIRST.length]} ${LAST[Math.floor(i / FIRST.length) % LAST.length]}`;
 }
@@ -319,7 +321,7 @@ async function main() {
           'Addis Ababa',
           v.make,
           2018 + (i % 6),
-          i % 3 === 0 ? 'in_review' : 'pending',
+          i % 3 === 0 ? 'in_review' : 'approved',
         ],
       );
       await client.query(

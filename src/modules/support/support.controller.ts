@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { SupportService } from './support.service';
 import {
   SendSupportMessageDto,
@@ -10,7 +20,10 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { UserRole } from '../auth/entities/user-account.entity';
 import { RedisRateLimitGuard } from '../../common/rate-limit/redis-rate-limit.guard';
-import { RateLimit, RateLimitPresets } from '../../common/rate-limit/rate-limit.decorator';
+import {
+  RateLimit,
+  RateLimitPresets,
+} from '../../common/rate-limit/rate-limit.decorator';
 
 @Controller('support')
 export class SupportController {
@@ -31,7 +44,11 @@ export class SupportController {
     @CurrentUser() user: { userId: string; roles: string[] },
     @Body() dto: SendSupportMessageDto,
   ) {
-    return this.support.postUserMessage(user.userId, user.roles ?? [], dto.body);
+    return this.support.postUserMessage(
+      user.userId,
+      user.roles ?? [],
+      dto.body,
+    );
   }
 }
 

@@ -30,7 +30,11 @@ export class DriverSubscription {
   @Column()
   driverId: string;
 
-  @Column({ type: 'enum', enum: SubscriptionState, default: SubscriptionState.INACTIVE })
+  @Column({
+    type: 'enum',
+    enum: SubscriptionState,
+    default: SubscriptionState.INACTIVE,
+  })
   state: SubscriptionState;
 
   @Column({ type: 'timestamptz', nullable: true })

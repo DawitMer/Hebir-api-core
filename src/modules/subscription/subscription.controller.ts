@@ -5,12 +5,14 @@ import {
   Get,
   Headers,
   Post,
+  Query,
   RawBodyRequest,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import * as crypto from 'crypto';
 import { SubscriptionService } from './subscription.service';
 import { PaymentWebhookDto } from './dto/payment-webhook.dto';
@@ -21,12 +23,14 @@ import {
   RateLimit,
   RateLimitPresets,
 } from '../../common/rate-limit/rate-limit.decorator';
+import { ChapaClient } from '../payments/chapa.client';
 
 @Controller('subscription')
 export class SubscriptionController {
   constructor(
     private readonly subscriptionService: SubscriptionService,
     private readonly config: ConfigService,
+    private readonly chapa: ChapaClient,
   ) {}
 
   /**
@@ -46,14 +50,71 @@ export class SubscriptionController {
   }
 
   /**
+   * Chapa dashboard webhook. Signature is checked, then the charge is
+   * re-fetched from Chapa so a forged body cannot activate a plan.
+   */
+  @UseGuards(RedisRateLimitGuard)
+  @RateLimit(RateLimitPresets.webhook)
+  @Post('webhook/chapa')
+  async chapaWebhook(@Req() req: RawBodyRequest<Request>) {
+    const raw = req.rawBody;
+    if (!raw?.length) {
+      throw new BadRequestException('Missing raw request body');
+    }
+    if (
+      !this.chapa.verifyWebhookSignature(
+        raw,
+        req.headers as Record<string, unknown>,
+      )
+    ) {
+      throw new BadRequestException('Invalid Chapa webhook signature');
+    }
+    const body = JSON.parse(raw.toString('utf8')) as {
+      tx_ref?: string;
+      trx_ref?: string;
+      event?: string;
+    };
+    const txRef = body.tx_ref ?? body.trx_ref;
+    if (!txRef) {
+      throw new BadRequestException('Missing tx_ref');
+    }
+    return this.subscriptionService.applyVerifiedChapaCharge(txRef);
+  }
+
+  /** Chapa GET callback after checkout. Re-verifies before activating. */
+  @UseGuards(RedisRateLimitGuard)
+  @RateLimit(RateLimitPresets.webhook)
+  @Get('chapa/callback')
+  async chapaCallback(
+    @Query('trx_ref') trxRef?: string,
+    @Query('tx_ref') txRef?: string,
+  ) {
+    const ref = trxRef || txRef;
+    if (!ref) {
+      throw new BadRequestException('Missing tx_ref');
+    }
+    return this.subscriptionService.applyVerifiedChapaCharge(ref);
+  }
+
+  @Get('chapa/return')
+  chapaReturn(@Res() res: Response) {
+    res
+      .type('text/plain')
+      .send('Payment submitted. Return to the Hebir Driver app.');
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('checkout')
+  checkout(@CurrentUser() user: { userId: string }) {
+    return this.subscriptionService.createChapaCheckout(user.userId);
+  }
+
+  /**
    * Verified against the exact bytes the provider signed. Hashing the parsed
    * DTO instead would only match by coincidence, because ValidationPipe
    * strips unknown fields and re-serialises in declaration order.
    */
-  private verifySignature(
-    rawBody: Buffer | undefined,
-    signature: string,
-  ) {
+  private verifySignature(rawBody: Buffer | undefined, signature: string) {
     const secret = this.config.get<string>('PAYMENT_WEBHOOK_SECRET');
     if (!rawBody?.length) {
       throw new BadRequestException(

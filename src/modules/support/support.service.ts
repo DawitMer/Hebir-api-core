@@ -184,9 +184,7 @@ export class SupportService {
           },
         );
       } catch (error) {
-        this.logger.warn(
-          `support notify failed: ${(error as Error).message}`,
-        );
+        this.logger.warn(`support notify failed: ${(error as Error).message}`);
       }
     }
     return this.mapMessage(message);

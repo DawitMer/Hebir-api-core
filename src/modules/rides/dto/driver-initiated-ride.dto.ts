@@ -7,11 +7,10 @@ import {
   IsObject,
   IsOptional,
   IsString,
-  Matches,
   MaxLength,
   ValidateNested,
 } from 'class-validator';
-import { ETHIOPIA_E164 } from '../../auth/dto/register.dto';
+import { IsEthiopiaPhone } from '../../../common/phone/ethiopia-phone';
 import { RIDE_VEHICLE_TYPES } from './request-ride.dto';
 
 class GeoPointDto {
@@ -26,9 +25,9 @@ class GeoPointDto {
 
 /** Street-hail / phone-join: driver creates an assigned ride for a rider. */
 export class DriverInitiatedRideDto {
-  @Matches(ETHIOPIA_E164, {
-    message: 'riderPhoneNumber must be +251 followed by 9 digits',
-  })
+  @IsEthiopiaPhone(
+    'riderPhoneNumber must be a valid Ethiopian mobile (+2519XXXXXXXX)',
+  )
   riderPhoneNumber!: string;
 
   @IsObject()

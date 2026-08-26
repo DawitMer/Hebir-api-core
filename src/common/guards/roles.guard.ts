@@ -1,4 +1,9 @@
-import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
+import {
+  CanActivate,
+  ExecutionContext,
+  ForbiddenException,
+  Injectable,
+} from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ROLES_KEY } from '../decorators/roles.decorator';
 import { UserRole } from '../../modules/auth/entities/user-account.entity';
@@ -30,7 +35,11 @@ function normalizeRoles(raw: unknown): string[] {
   if (Array.isArray(raw)) return raw.map(String);
   if (typeof raw === 'string' && raw.length > 0) {
     // Postgres text form: {driver,admin}
-    return raw.replace(/[{}]/g, '').split(',').map((s) => s.trim()).filter(Boolean);
+    return raw
+      .replace(/[{}]/g, '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
   return [];
 }

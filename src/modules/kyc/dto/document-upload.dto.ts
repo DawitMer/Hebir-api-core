@@ -1,4 +1,13 @@
-import { IsIn, IsInt, IsOptional, IsString, Matches, MaxLength, Min } from 'class-validator';
+import {
+  IsIn,
+  IsInt,
+  IsISO8601,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import { DocumentCategory } from '../entities/document-submission.entity';
 
 const DOC_TYPES = [
@@ -33,7 +42,7 @@ export class ConfirmDocumentDto {
   category: DocumentCategory;
 
   @IsOptional()
-  @IsString()
+  @IsISO8601()
   expiresAt?: string;
 }
 
@@ -59,4 +68,29 @@ export class StartVerificationDto {
   @IsString()
   @MaxLength(24)
   vehicleColor?: string;
+}
+
+/** Replacement car. The live vehicles row stays until ops approves. */
+export class VehicleChangeDto {
+  @IsString()
+  @MaxLength(40)
+  make: string;
+
+  @IsString()
+  @MaxLength(40)
+  model: string;
+
+  @IsString()
+  @MaxLength(24)
+  plate: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(24)
+  color?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1990)
+  year?: number;
 }

@@ -89,6 +89,20 @@ export class Ride {
   @Column({ type: 'timestamptz', nullable: true })
   offerExpiresAt: Date | null;
 
+  /**
+   * Street-hail PIN gate. Postgres is the source of truth so a Redis flush
+   * cannot let the driver skip the rider code. Redis only caches plaintext
+   * for the rider UI.
+   */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  startCodeHash: string | null;
+
+  @Column({ type: 'int', default: 0 })
+  startCodeAttempts: number;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  startCodeExpiresAt: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

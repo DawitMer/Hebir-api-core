@@ -2,10 +2,7 @@ import 'reflect-metadata';
 import { DataSource, DataSourceOptions } from 'typeorm';
 import * as fs from 'fs';
 import * as path from 'path';
-import {
-  resolveMigrationDatabaseUrl,
-  resolvePoolOptions,
-} from './pool.config';
+import { resolveMigrationDatabaseUrl, resolvePoolOptions } from './pool.config';
 
 /**
  * TypeORM CLI data source (migrations generate/run).
@@ -48,6 +45,8 @@ const common: Partial<DataSourceOptions> = {
   migrations: [path.join(__dirname, './migrations/*.{ts,js}')],
   synchronize: false,
   migrationsTableName: 'migrations',
+  // Lets AddDeletedAccountStanding disable its transaction (PG ADD VALUE).
+  migrationsTransactionMode: 'each',
   logging: process.env.TYPEORM_LOGGING === 'true',
   poolSize: pool.poolSize,
   connectTimeoutMS: pool.connectTimeoutMS,

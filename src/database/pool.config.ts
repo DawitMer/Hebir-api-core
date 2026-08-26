@@ -42,7 +42,10 @@ function parsePositiveInt(
 }
 
 /** Neon pooled hosts include `-pooler`; local compose uses port 6432. */
-export function isBehindPooler(url: string | undefined, flag?: string): boolean {
+export function isBehindPooler(
+  url: string | undefined,
+  flag?: string,
+): boolean {
   if (flag === 'true') return true;
   if (!url) return false;
   try {
@@ -64,7 +67,10 @@ export function resolvePoolOptions(env: PoolEnv = process.env): ResolvedPool {
   const defaultMax = behindPooler ? 10 : 20;
   const poolSize = Math.max(1, parsePositiveInt(env.DB_POOL_MAX, defaultMax));
   const min = parsePositiveInt(env.DB_POOL_MIN, 0);
-  const idleTimeoutMillis = parsePositiveInt(env.DB_POOL_IDLE_TIMEOUT_MS, 30_000);
+  const idleTimeoutMillis = parsePositiveInt(
+    env.DB_POOL_IDLE_TIMEOUT_MS,
+    30_000,
+  );
   const connectTimeoutMS = parsePositiveInt(
     env.DB_POOL_CONNECTION_TIMEOUT_MS,
     10_000,
@@ -89,7 +95,9 @@ export function resolvePoolOptions(env: PoolEnv = process.env): ResolvedPool {
  * Prefer direct (non-pooled) URL for CLI migrations / DDL.
  * Falls back to DATABASE_URL when unset.
  */
-export function resolveMigrationDatabaseUrl(env: PoolEnv = process.env): string | undefined {
+export function resolveMigrationDatabaseUrl(
+  env: PoolEnv = process.env,
+): string | undefined {
   const direct = env.DATABASE_DIRECT_URL?.trim();
   if (direct) return direct;
   return env.DATABASE_URL?.trim() || undefined;

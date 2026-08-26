@@ -1,6 +1,9 @@
 import { NotFoundException } from '@nestjs/common';
 import { Trip } from './entities/trip.entity';
-import { RiderRequest, RiderRequestStatus } from './entities/rider-request.entity';
+import {
+  RiderRequest,
+  RiderRequestStatus,
+} from './entities/rider-request.entity';
 import { MatchingService } from './matching.service';
 
 describe('MatchingService findMatches', () => {

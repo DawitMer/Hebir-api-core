@@ -27,6 +27,8 @@ export class OneActiveRidePerRider1786365500000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`DROP INDEX IF EXISTS "UQ_rides_one_active_per_rider"`);
+    await queryRunner.query(
+      `DROP INDEX IF EXISTS "UQ_rides_one_active_per_rider"`,
+    );
   }
 }

@@ -6,12 +6,34 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { UserAccount, UserRole } from '../auth/entities/user-account.entity';
-import { DriverProfile } from '../rides/entities/driver-profile.entity';
+import { In, Repository } from 'typeorm';
+import {
+  AccountStanding,
+  UserAccount,
+  UserRole,
+} from '../auth/entities/user-account.entity';
+import { AuthService } from '../auth/auth.service';
+import {
+  DriverProfile,
+  DriverStatus,
+} from '../rides/entities/driver-profile.entity';
 import { Vehicle } from '../rides/entities/vehicle.entity';
 import { Ride, RideStatus } from '../rides/entities/ride.entity';
 import { UpdateMeDto } from './dto/update-me.dto';
+import {
+  DriverVerification,
+  VerificationStatus,
+} from '../kyc/entities/driver-verification.entity';
+
+const ACTIVE_RIDE_STATUSES = [
+  RideStatus.REQUESTED,
+  RideStatus.SEARCHING,
+  RideStatus.OFFERED,
+  RideStatus.MATCHED,
+  RideStatus.ACCEPTED,
+  RideStatus.ARRIVING,
+  RideStatus.IN_PROGRESS,
+];
 
 @Injectable()
 export class UsersService {
@@ -24,6 +46,9 @@ export class UsersService {
     private readonly vehicles: Repository<Vehicle>,
     @InjectRepository(Ride)
     private readonly rides: Repository<Ride>,
+    @InjectRepository(DriverVerification)
+    private readonly verifications: Repository<DriverVerification>,
+    private readonly authService: AuthService,
   ) {}
 
   async getMe(userId: string) {
@@ -77,7 +102,64 @@ export class UsersService {
     return this.toPublicProfile(user);
   }
 
+  /**
+   * Soft-delete the caller's account. Phone/username are released so the
+   * same number can register again. Ride history rows keep the UUID FK.
+   */
+  async deleteMe(userId: string, accessJti?: string) {
+    const user = await this.users
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.id = :userId', { userId })
+      .getOne();
+    if (!user) throw new NotFoundException('User not found');
+    if (user.standing === AccountStanding.DELETED) {
+      await this.authService.logoutAll(userId, accessJti);
+      return { deleted: true };
+    }
+
+    const active = await this.rides.findOne({
+      where: [
+        { riderId: userId, status: In(ACTIVE_RIDE_STATUSES) },
+        { driverId: userId, status: In(ACTIVE_RIDE_STATUSES) },
+      ],
+    });
+    if (active) {
+      throw new ConflictException(
+        'Finish or cancel your current ride before deleting your account',
+      );
+    }
+
+    user.standing = AccountStanding.DELETED;
+    user.phoneNumber = `deleted:${userId}`;
+    user.username = null;
+    user.fullName = null;
+    user.tin = null;
+    user.savedPlaces = null;
+    user.passwordHash = null;
+    await this.users.save(user);
+
+    await this.driverProfiles.update(
+      { userId },
+      { status: DriverStatus.OFFLINE, idleSince: null },
+    );
+
+    this.authService.invalidateAuthContext(userId);
+    await this.authService.logoutAll(userId, accessJti);
+    return { deleted: true };
+  }
+
   private async upsertVehicle(driverId: string, dto: UpdateMeDto) {
+    const verification = await this.verifications.findOne({
+      where: { driverId },
+      order: { submittedAt: 'DESC' },
+    });
+    if (verification?.status === VerificationStatus.APPROVED) {
+      throw new ConflictException(
+        'This vehicle is approved and cannot be edited. Add a new vehicle to request a review.',
+      );
+    }
+
     let vehicle = await this.vehicles.findOne({ where: { driverId } });
     if (!vehicle) {
       const make = dto.vehicleMake?.trim();

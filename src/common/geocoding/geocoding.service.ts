@@ -5,10 +5,7 @@ import * as http from 'http';
 import * as https from 'https';
 import Redis from 'ioredis';
 import { REDIS_CLIENT } from '../../redis/redis.module';
-import {
-  compassBearing,
-  nearestAddisPlace,
-} from './addis-places';
+import { compassBearing, nearestAddisPlace } from './addis-places';
 
 export interface GeoPointLike {
   lat: number;
@@ -31,6 +28,23 @@ interface NominatimResponse {
   address?: NominatimAddress;
 }
 
+interface GoogleAddressComponent {
+  long_name: string;
+  short_name: string;
+  types: string[];
+}
+
+interface GoogleGeocodeResult {
+  formatted_address?: string;
+  address_components?: GoogleAddressComponent[];
+}
+
+interface GoogleGeocodeResponse {
+  status: string;
+  results?: GoogleGeocodeResult[];
+  error_message?: string;
+}
+
 /** Coordinates rounded to ~11 m — enough precision for a street address. */
 const CACHE_PRECISION = 4;
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 30;
@@ -43,17 +57,18 @@ const MAX_PLACE_RADIUS_M = 8000;
 /**
  * Turns coordinates into a human-readable street address.
  *
- * Online lookups go to Nominatim; results are cached in Redis so repeated
- * pickups at the same spot cost nothing. When the network is unavailable the
- * service degrades to naming the nearest Addis Ababa landmark with a distance
- * and bearing, so a stored address always describes the real coordinates
- * rather than whatever label the client happened to send.
+ * Priority Chain:
+ * 1. Redis Cache (`geo:rev:lat:lng`)
+ * 2. Official Google Maps Geocoding API (when GOOGLE_MAPS_API_KEY is configured)
+ * 3. Nominatim / OpenStreetMap Geocoding API
+ * 4. Offline Addis Ababa landmark centroids (degraded graceful fallback)
  */
 @Injectable()
 export class GeocodingService {
   private readonly logger = new Logger(GeocodingService.name);
   private readonly http: AxiosInstance;
   private readonly baseUrl: string;
+  private readonly googleApiKey?: string;
   private readonly onlineEnabled: boolean;
   private readonly timeoutMs: number;
 
@@ -68,26 +83,35 @@ export class GeocodingService {
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {
     this.baseUrl = (
-      config.get<string>('NOMINATIM_URL') ?? 'https://nominatim.openstreetmap.org'
+      config.get<string>('NOMINATIM_URL') ??
+      'https://nominatim.openstreetmap.org'
     ).replace(/\/$/, '');
+    this.googleApiKey = config.get<string>('GOOGLE_MAPS_API_KEY')?.trim();
     this.onlineEnabled =
       (config.get<string>('GEOCODING_ONLINE') ?? 'true') !== 'false';
-    this.timeoutMs = Number(config.get<string>('GEOCODING_TIMEOUT_MS') ?? 2000);
+    this.timeoutMs = Number(config.get<string>('GEOCODING_TIMEOUT_MS') ?? 2500);
     this.failureThreshold = Number(
       config.get<string>('GEOCODING_BREAKER_FAILURES') ?? 3,
     );
-    this.muteMs = Number(config.get<string>('GEOCODING_BREAKER_OPEN_MS') ?? 60_000);
+    this.muteMs = Number(
+      config.get<string>('GEOCODING_BREAKER_OPEN_MS') ?? 60_000,
+    );
 
     this.http = axios.create({
       timeout: this.timeoutMs,
       headers: {
-        // Nominatim rejects requests without an identifying User-Agent.
         'User-Agent': 'Hebir/1.0 (ride-hailing; contact: ops@hebir.local)',
         'Accept-Language': 'en',
       },
       httpAgent: new http.Agent({ keepAlive: true, maxSockets: 20 }),
       httpsAgent: new https.Agent({ keepAlive: true, maxSockets: 20 }),
     });
+
+    if (this.googleApiKey) {
+      this.logger.log(
+        'Google Maps Geocoding API initialized with configured API key.',
+      );
+    }
   }
 
   /**
@@ -122,9 +146,7 @@ export class GeocodingService {
   }
 
   /**
-   * Resolves both ends of a ride in parallel. `prefer` values (typically the
-   * label the rider picked in the UI) are kept only when geocoding cannot do
-   * better than a coarse fallback.
+   * Resolves both ends of a ride in parallel.
    */
   async reverseGeocodePair(
     pickup: GeoPointLike,
@@ -156,6 +178,22 @@ export class GeocodingService {
   private async lookupOnline(point: GeoPointLike): Promise<string | null> {
     if (!this.onlineEnabled || this.onlineMuted) return null;
 
+    // 1. Try Google Maps Geocoding API if key configured
+    if (this.googleApiKey) {
+      try {
+        const googleAddress = await this.lookupGoogleMaps(point);
+        if (googleAddress) {
+          this.consecutiveFailures = 0;
+          return googleAddress;
+        }
+      } catch (err) {
+        this.logger.debug(
+          `Google Maps geocode failed, falling back to OSM: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // 2. Fallback to Nominatim / OSM Geocoding
     try {
       const { data } = await this.http.get<NominatimResponse>(
         `${this.baseUrl}/reverse`,
@@ -184,6 +222,73 @@ export class GeocodingService {
     }
   }
 
+  private async lookupGoogleMaps(point: GeoPointLike): Promise<string | null> {
+    const { data } = await this.http.get<GoogleGeocodeResponse>(
+      'https://maps.googleapis.com/maps/api/geocode/json',
+      {
+        params: {
+          latlng: `${point.lat},${point.lng}`,
+          key: this.googleApiKey,
+          language: 'en',
+        },
+      },
+    );
+
+    if (data?.status !== 'OK' || !data.results || data.results.length === 0) {
+      return null;
+    }
+
+    return this.formatGoogleMaps(data.results);
+  }
+
+  private formatGoogleMaps(results: GoogleGeocodeResult[]): string | null {
+    const best =
+      results.find((r) =>
+        r.address_components?.some((c) =>
+          c.types.some((t) =>
+            [
+              'route',
+              'street_address',
+              'premise',
+              'point_of_interest',
+              'neighborhood',
+            ].includes(t),
+          ),
+        ),
+      ) ?? results[0];
+
+    if (!best || !best.address_components) {
+      return best?.formatted_address?.trim() || null;
+    }
+
+    const components = best.address_components;
+    const getComp = (...types: string[]) =>
+      components.find((c) => c.types.some((t) => types.includes(t)))?.long_name;
+
+    const street = getComp('route', 'street_address');
+    const neighborhood = getComp(
+      'sublocality',
+      'sublocality_level_1',
+      'neighborhood',
+    );
+    const subCity = getComp(
+      'administrative_area_level_2',
+      'administrative_area_level_3',
+    );
+    const city =
+      getComp('locality', 'administrative_area_level_1') ?? 'Addis Ababa';
+
+    const parts = [street, neighborhood ?? subCity, city].filter(
+      (p): p is string => Boolean(p && p.trim()),
+    );
+
+    if (parts.length === 0) {
+      return best.formatted_address?.trim() || null;
+    }
+
+    return parts.join(', ');
+  }
+
   private formatNominatim(data: NominatimResponse): string | null {
     const address = data?.address;
     if (!address) {
@@ -195,8 +300,8 @@ export class GeocodingService {
       address.neighbourhood ?? address.suburb ?? address.city_district;
     const city = address.city ?? address.town ?? address.state;
 
-    const parts = [street, area, city].filter(
-      (part): part is string => Boolean(part && part.trim()),
+    const parts = [street, area, city].filter((part): part is string =>
+      Boolean(part && part.trim()),
     );
     if (parts.length === 0) {
       return data.display_name?.trim() || null;

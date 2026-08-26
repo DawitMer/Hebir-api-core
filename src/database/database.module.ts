@@ -29,7 +29,9 @@ function resolveSynchronize(config: ConfigService): boolean {
           DB_USE_PGBOUNCER: config.get<string>('DB_USE_PGBOUNCER'),
           DB_POOL_MAX: config.get<string>('DB_POOL_MAX'),
           DB_POOL_MIN: config.get<string>('DB_POOL_MIN'),
-          DB_POOL_IDLE_TIMEOUT_MS: config.get<string>('DB_POOL_IDLE_TIMEOUT_MS'),
+          DB_POOL_IDLE_TIMEOUT_MS: config.get<string>(
+            'DB_POOL_IDLE_TIMEOUT_MS',
+          ),
           DB_POOL_CONNECTION_TIMEOUT_MS: config.get<string>(
             'DB_POOL_CONNECTION_TIMEOUT_MS',
           ),
@@ -43,8 +45,10 @@ function resolveSynchronize(config: ConfigService): boolean {
           migrations: [migrationsDir],
           // Prefer `npm run migration:run` with DATABASE_DIRECT_URL in prod.
           // Boot-time run is OK for Neon session/pooler on simple DDL.
-          migrationsRun: config.get<string>('TYPEORM_MIGRATIONS_RUN') !== 'false',
+          migrationsRun:
+            config.get<string>('TYPEORM_MIGRATIONS_RUN') !== 'false',
           migrationsTableName: 'migrations',
+          migrationsTransactionMode: 'each',
           poolSize: pool.poolSize,
           connectTimeoutMS: pool.connectTimeoutMS,
           applicationName: pool.applicationName,

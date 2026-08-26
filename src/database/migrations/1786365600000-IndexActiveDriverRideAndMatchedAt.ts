@@ -4,9 +4,7 @@ import { bootstrappedFromBaseline } from '../migration-utils';
 /**
  * One live ride per assigned driver + hot path for the stale-MATCHED reaper.
  */
-export class IndexActiveDriverRideAndMatchedAt1786365600000
-  implements MigrationInterface
-{
+export class IndexActiveDriverRideAndMatchedAt1786365600000 implements MigrationInterface {
   name = 'IndexActiveDriverRideAndMatchedAt1786365600000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -30,7 +28,11 @@ export class IndexActiveDriverRideAndMatchedAt1786365600000
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`DROP INDEX IF EXISTS "IDX_rides_status_matchedAt"`);
-    await queryRunner.query(`DROP INDEX IF EXISTS "UQ_rides_one_active_per_driver"`);
+    await queryRunner.query(
+      `DROP INDEX IF EXISTS "IDX_rides_status_matchedAt"`,
+    );
+    await queryRunner.query(
+      `DROP INDEX IF EXISTS "UQ_rides_one_active_per_driver"`,
+    );
   }
 }

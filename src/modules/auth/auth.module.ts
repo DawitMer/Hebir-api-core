@@ -11,6 +11,7 @@ import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { OtpService } from './otp.service';
 import { SmsService } from './sms.service';
+import { FirebaseService } from './firebase/firebase.service';
 
 @Module({
   imports: [
@@ -30,7 +31,7 @@ import { SmsService } from './sms.service';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, OtpService, SmsService],
-  exports: [AuthService, OtpService, TypeOrmModule],
+  providers: [AuthService, JwtStrategy, OtpService, SmsService, FirebaseService],
+  exports: [AuthService, OtpService, FirebaseService, TypeOrmModule],
 })
 export class AuthModule {}

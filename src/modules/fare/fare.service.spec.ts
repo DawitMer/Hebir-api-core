@@ -65,8 +65,7 @@ describe('FareService', () => {
     const straight = service.quotedTripMetrics(bole, kazanchis, 1, 4);
     expect(quoted.distanceKm).toBeGreaterThan(0);
     expect(straight.distanceKm).toBeGreaterThanOrEqual(
-      service.quotedTripMetrics(bole, kazanchis).distanceKm /
-        1.35,
+      service.quotedTripMetrics(bole, kazanchis).distanceKm / 1.35,
     );
     expect(quoted.durationMinutes).toBeGreaterThan(0);
   });
@@ -84,9 +83,13 @@ describe('FareService', () => {
     const started = new Date('2026-08-16T10:00:00Z');
     const done = new Date('2026-08-16T10:25:00Z');
     expect(service.settledDurationMinutes(18, started, done)).toBe(25);
-    expect(service.settledDurationMinutes(18, started, new Date('2026-08-16T10:05:00Z'))).toBe(
-      18 * 0.9,
-    );
+    expect(
+      service.settledDurationMinutes(
+        18,
+        started,
+        new Date('2026-08-16T10:05:00Z'),
+      ),
+    ).toBe(18 * 0.9);
   });
 
   it('exposes the new default rates', () => {

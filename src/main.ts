@@ -2,10 +2,15 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Logger } from 'nestjs-pino';
+import * as express from 'express';
 import helmet from 'helmet';
 import { loadSecretsIntoEnv } from './config/secrets/load-secrets';
-import { buildCorsOptions, resolveAllowedOrigins } from './config/security.config';
+import {
+  buildCorsOptions,
+  resolveAllowedOrigins,
+} from './config/security.config';
 import { startTracingIfEnabled } from './observability/tracing';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
@@ -19,6 +24,14 @@ async function bootstrap() {
   app.useLogger(app.get(Logger));
   const config = app.get(ConfigService);
   const logger = app.get(Logger);
+
+  // Parse raw binary payloads for KYC document uploads up to 15MB
+  app.use(
+    express.raw({
+      type: ['image/*', 'application/pdf', 'application/octet-stream'],
+      limit: '15mb',
+    }),
+  );
 
   // Trust the first reverse-proxy hop so req.ip / rate limits use the real client.
   const trustProxy = config.get<string>('TRUST_PROXY') ?? '1';
@@ -59,6 +72,7 @@ async function bootstrap() {
       forbidNonWhitelisted: true,
     }),
   );
+  app.useGlobalFilters(new AllExceptionsFilter());
 
   app.enableShutdownHooks();
 

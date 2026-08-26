@@ -37,7 +37,8 @@ export class RatingsService {
 
     let ratedUser: string;
     if (ride.riderId === ratedBy) {
-      if (!ride.driverId) throw new ConflictException('This ride has no matched driver');
+      if (!ride.driverId)
+        throw new ConflictException('This ride has no matched driver');
       ratedUser = ride.driverId;
     } else if (ride.driverId === ratedBy) {
       ratedUser = ride.riderId;
@@ -79,7 +80,9 @@ export class RatingsService {
       .where('r.ratedUser = :driverId', { driverId })
       .getRawOne<{ avg: string | null }>();
 
-    const profile = await this.driverProfiles.findOne({ where: { userId: driverId } });
+    const profile = await this.driverProfiles.findOne({
+      where: { userId: driverId },
+    });
     if (profile && result?.avg != null) {
       profile.ratingAvg = String(Math.round(Number(result.avg) * 100) / 100);
       await this.driverProfiles.save(profile);

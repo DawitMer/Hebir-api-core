@@ -57,11 +57,15 @@ export class DispatchQueueService implements OnModuleInit {
   }
 
   /** Start (or restart) expanding-radius search for a ride. */
-  async enqueueDispatch(rideId: string, delayMs = 0): Promise<void> {
+  async enqueueDispatch(
+    rideId: string,
+    delayMs = 0,
+    skipDriverIds: string[] = [],
+  ): Promise<void> {
     const state: DispatchState = {
       startedAt: Date.now(),
       radiusKm: INITIAL_RADIUS_KM,
-      triedDriverIds: [],
+      triedDriverIds: [...new Set(skipDriverIds.filter(Boolean))],
     };
     await this.saveState(rideId, state);
     await this.scheduleJob(
@@ -237,7 +241,10 @@ export class DispatchQueueService implements OnModuleInit {
       return;
     }
     await this.redis.del(`${DISPATCH_JOB_PREFIX}${jobId}`);
-    await this.scheduleJob({ ...job, id: randomUUID(), attempts }, DISPATCH_POLL_MS);
+    await this.scheduleJob(
+      { ...job, id: randomUUID(), attempts },
+      DISPATCH_POLL_MS,
+    );
   }
 
   /**

@@ -36,7 +36,9 @@ export class UuidAuditActor1786365400000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`DROP INDEX IF EXISTS "IDX_audit_trails_actor_occurred"`);
+    await queryRunner.query(
+      `DROP INDEX IF EXISTS "IDX_audit_trails_actor_occurred"`,
+    );
     await queryRunner.query(`DROP INDEX IF EXISTS "IDX_audit_trails_target"`);
     await queryRunner.query(
       `ALTER TABLE "audit_trails" DROP CONSTRAINT IF EXISTS "FK_audit_trails_actorId"`,

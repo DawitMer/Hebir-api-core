@@ -19,6 +19,7 @@ import {
   ConfirmDocumentDto,
   PresignDocumentDto,
   StartVerificationDto,
+  VehicleChangeDto,
 } from './dto/document-upload.dto';
 import { KycStorageService } from './kyc-storage.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -55,6 +56,16 @@ export class KycController {
 
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.DRIVER, UserRole.ADMIN)
+  @Post('me/vehicle-change')
+  requestVehicleChange(
+    @CurrentUser() user: { userId: string },
+    @Body() dto: VehicleChangeDto,
+  ) {
+    return this.kycService.requestVehicleChange(user.userId, dto);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.DRIVER, UserRole.ADMIN)
   @Get('me/documents')
   myDocuments(@CurrentUser() user: { userId: string }) {
     return this.kycService.listMyDocuments(user.userId);
@@ -77,10 +88,19 @@ export class KycController {
   async uploadBody(
     @CurrentUser() user: { userId: string },
     @Query('key') key: string,
-    @Req() req: { rawBody?: Buffer; headers: Record<string, string | string[] | undefined> },
+    @Req()
+    req: {
+      rawBody?: Buffer;
+      body?: Buffer | unknown;
+      headers: Record<string, string | string[] | undefined>;
+    },
   ) {
     if (!key) throw new BadRequestException('key is required');
-    const body = req.rawBody;
+    const body = req.rawBody?.length
+      ? req.rawBody
+      : Buffer.isBuffer(req.body) && req.body.length
+        ? req.body
+        : undefined;
     if (!body?.length) throw new BadRequestException('Empty body');
     const contentType = req.headers['content-type'];
     return this.kycService.saveLocalUpload(
@@ -190,7 +210,12 @@ export class KycController {
     @Param('agentId') agentId: string,
     @CurrentUser() user: { userId: string; roles: string[] },
   ) {
-    return this.kycService.assign(id, agentId, user.userId, user.roles.join(','));
+    return this.kycService.assign(
+      id,
+      agentId,
+      user.userId,
+      user.roles.join(','),
+    );
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)

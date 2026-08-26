@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { IncidentsService } from './incidents.service';
 import {
   CreateIncidentDto,
@@ -66,6 +75,11 @@ export class IncidentsController {
     @Body() dto: UpdateIncidentStatusDto,
     @CurrentUser() user: { userId: string },
   ) {
-    return this.incidents.updateStatus(caseNumber, dto, user.userId, dto.assignedToName);
+    return this.incidents.updateStatus(
+      caseNumber,
+      dto,
+      user.userId,
+      dto.assignedToName,
+    );
   }
 }

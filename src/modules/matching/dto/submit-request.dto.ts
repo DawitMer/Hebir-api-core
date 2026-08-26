@@ -1,5 +1,12 @@
 import { Type } from 'class-transformer';
-import { IsDateString, IsInt, IsNumber, IsObject, Min, ValidateNested } from 'class-validator';
+import {
+  IsDateString,
+  IsInt,
+  IsNumber,
+  IsObject,
+  Min,
+  ValidateNested,
+} from 'class-validator';
 
 class GeoPointDto {
   @IsNumber()

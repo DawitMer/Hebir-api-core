@@ -50,15 +50,17 @@ describe('BookingService seat oversell', () => {
       createQueryBuilder: jest.fn().mockReturnValue(tripQb),
       findOne: jest.fn().mockResolvedValue({ ...trip, remainingSeats: 0 }),
     };
-    bookings.manager.transaction.mockImplementation(async (cb: (em: any) => Promise<void>) =>
-      cb(em),
+    bookings.manager.transaction.mockImplementation(
+      async (cb: (em: any) => Promise<void>) => cb(em),
     );
     return { em, tripQb };
   }
 
   beforeEach(() => {
     bookings = {
-      findOne: jest.fn().mockResolvedValue({ ...heldBooking, status: BookingStatus.CONFIRMED }),
+      findOne: jest
+        .fn()
+        .mockResolvedValue({ ...heldBooking, status: BookingStatus.CONFIRMED }),
       save: jest.fn(async (b: Booking) => b),
       manager: { transaction: jest.fn() },
     };
@@ -87,9 +89,16 @@ describe('BookingService seat oversell', () => {
     mockTransaction(async () => ({ affected: 1 }));
     bookings.findOne
       .mockResolvedValueOnce({ ...heldBooking })
-      .mockResolvedValueOnce({ ...heldBooking, status: BookingStatus.CONFIRMED });
+      .mockResolvedValueOnce({
+        ...heldBooking,
+        status: BookingStatus.CONFIRMED,
+      });
 
-    const result = await service.driverRespond(driverId, heldBooking.id, 'accept');
+    const result = await service.driverRespond(
+      driverId,
+      heldBooking.id,
+      'accept',
+    );
 
     expect(result.status).toBe(BookingStatus.CONFIRMED);
     expect(metrics.seatConflictTotal.inc).not.toHaveBeenCalled();
@@ -116,12 +125,18 @@ describe('BookingService seat oversell', () => {
       return { affected: 0 };
     });
 
-    bookings.findOne.mockImplementation(async ({ where }: { where: { id: string } }) => {
-      if (where.id === 'b1' || where.id === 'b2') {
-        return { ...heldBooking, id: where.id };
-      }
-      return { ...heldBooking, id: where.id, status: BookingStatus.CONFIRMED };
-    });
+    bookings.findOne.mockImplementation(
+      async ({ where }: { where: { id: string } }) => {
+        if (where.id === 'b1' || where.id === 'b2') {
+          return { ...heldBooking, id: where.id };
+        }
+        return {
+          ...heldBooking,
+          id: where.id,
+          status: BookingStatus.CONFIRMED,
+        };
+      },
+    );
 
     const outcomes = await Promise.allSettled([
       service.driverRespond(driverId, 'b1', 'accept'),

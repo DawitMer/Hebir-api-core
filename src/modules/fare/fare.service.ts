@@ -130,10 +130,7 @@ export class FareService {
 
     const surgeMultiplier =
       input.surgeMultiplier != null && Number.isFinite(input.surgeMultiplier)
-        ? Math.min(
-            Math.max(1, input.surgeMultiplier),
-            rates.surgeMaxMultiplier,
-          )
+        ? Math.min(Math.max(1, input.surgeMultiplier), rates.surgeMaxMultiplier)
         : input.zoneId
           ? await this.resolveSurgeMultiplier(
               input.zoneId,
@@ -142,14 +139,22 @@ export class FareService {
           : 1;
 
     const vehicleMultiplier = this.vehicleTypeMultiplier(input.vehicleType);
-    const total = Math.round(subtotal * surgeMultiplier * vehicleMultiplier);
+    const combinedMultiplier = surgeMultiplier * vehicleMultiplier;
+    const total = Math.round(subtotal * combinedMultiplier);
+
+    // Scale component charges with multiplier and reconcile with total
+    // so receipts, driver earnings, and rider invoices always sum exactly to total.
+    const distanceScaled = Math.round(distanceCharge * combinedMultiplier * 100) / 100;
+    const timeScaled = Math.round(timeCharge * combinedMultiplier * 100) / 100;
+    const waitScaled = Math.round(waitCharge * combinedMultiplier * 100) / 100;
+    const initialScaled = Math.round((total - distanceScaled - timeScaled - waitScaled) * 100) / 100;
 
     return {
       vehicleMultiplier,
-      initialFee,
-      distanceCharge: Math.round(distanceCharge * 100) / 100,
-      timeCharge: Math.round(timeCharge * 100) / 100,
-      waitCharge: Math.round(waitCharge * 100) / 100,
+      initialFee: initialScaled,
+      distanceCharge: distanceScaled,
+      timeCharge: timeScaled,
+      waitCharge: waitScaled,
       distanceMeters: Math.round(distanceMeters * 100) / 100,
       durationMinutes: Math.round(durationMinutes * 10) / 10,
       waitMinutes: Math.round(waitMinutes * 10) / 10,
@@ -160,7 +165,7 @@ export class FareService {
       subtotal: Math.round(subtotal * 100) / 100,
       total,
       platformFee: 0,
-      base: initialFee,
+      base: initialScaled,
     };
   }
 
@@ -193,7 +198,10 @@ export class FareService {
     ) {
       const floorMin = fallbackMinutes * 0.5;
       const capMin = fallbackMinutes * 2.5;
-      durationMinutes = Math.min(Math.max(clientDurationMinutes, floorMin), capMin);
+      durationMinutes = Math.min(
+        Math.max(clientDurationMinutes, floorMin),
+        capMin,
+      );
     }
 
     return { distanceKm, durationMinutes };

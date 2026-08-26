@@ -73,10 +73,18 @@ export class AddIncidents1786363545077 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`DROP INDEX IF EXISTS "public"."IDX_incidents_caseNumber"`);
+    await queryRunner.query(
+      `DROP INDEX IF EXISTS "public"."IDX_incidents_caseNumber"`,
+    );
     await queryRunner.query(`DROP TABLE IF EXISTS "incidents"`);
-    await queryRunner.query(`DROP TYPE IF EXISTS "public"."incidents_status_enum"`);
-    await queryRunner.query(`DROP TYPE IF EXISTS "public"."incidents_priority_enum"`);
-    await queryRunner.query(`DROP TYPE IF EXISTS "public"."incidents_type_enum"`);
+    await queryRunner.query(
+      `DROP TYPE IF EXISTS "public"."incidents_status_enum"`,
+    );
+    await queryRunner.query(
+      `DROP TYPE IF EXISTS "public"."incidents_priority_enum"`,
+    );
+    await queryRunner.query(
+      `DROP TYPE IF EXISTS "public"."incidents_type_enum"`,
+    );
   }
 }

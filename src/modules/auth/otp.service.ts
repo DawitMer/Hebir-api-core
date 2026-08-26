@@ -68,7 +68,8 @@ export class OtpService {
 
     const nodeEnv = this.config.get<string>('NODE_ENV');
     if (nodeEnv === 'development' || nodeEnv === 'test') {
-      return { sent: true, expiresInSec: OTP_TTL_SEC, debugCode: code };
+      console.log(`\n\n[DEV OTP] Phone: ${phoneNumber} Code: ${code}\n\n`);
+      return { sent: true, expiresInSec: OTP_TTL_SEC };
     }
 
     try {

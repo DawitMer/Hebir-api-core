@@ -12,7 +12,6 @@ import {
   VerificationStatus,
 } from './entities/driver-verification.entity';
 import {
-  DocumentCategory,
   DocumentReviewStatus,
   DocumentSubmission,
 } from './entities/document-submission.entity';
@@ -27,14 +26,21 @@ import {
   ConfirmDocumentDto,
   PresignDocumentDto,
   StartVerificationDto,
+  VehicleChangeDto,
 } from './dto/document-upload.dto';
 import { KycStorageService } from './kyc-storage.service';
+import {
+  documentRequiresExpiry,
+  isApprovedKycDocumentLocked,
+  isKycDocumentExpired,
+} from './kyc-document-policy';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { UserAccount } from '../auth/entities/user-account.entity';
 import { Vehicle } from '../rides/entities/vehicle.entity';
 
 /** Review queues are worked top-down; this bounds one page. */
 const MAX_LIST_ROWS = 500;
+const VEHICLE_CHANGE_DOC_TYPES = ['registration', 'insurance'] as const;
 
 @Injectable()
 export class KycService {
@@ -94,11 +100,10 @@ export class KycService {
       where: { driverId },
       order: { submittedAt: 'DESC' },
     });
-    if (
-      existing &&
-      existing.status !== VerificationStatus.REJECTED
-    ) {
-      await this.ensureVehicleFromApplication(driverId, existing, dto);
+    if (existing && existing.status !== VerificationStatus.REJECTED) {
+      if (existing.status !== VerificationStatus.APPROVED) {
+        await this.ensureVehicleFromApplication(driverId, existing, dto);
+      }
       return existing;
     }
 
@@ -157,20 +162,175 @@ export class KycService {
       order: { submittedAt: 'DESC' },
     });
     if (!existing) throw new NotFoundException('No KYC application yet');
-    await this.ensureVehicleFromApplication(driverId, existing);
+    if (existing.status !== VerificationStatus.APPROVED) {
+      await this.ensureVehicleFromApplication(driverId, existing);
+    }
     return existing;
   }
 
   async listMyDocuments(driverId: string) {
     const verification = await this.getMyVerification(driverId);
+    if (
+      verification.status === VerificationStatus.APPROVED &&
+      !verification.vehicleChangePending
+    ) {
+      await this.markDocumentsApproved(verification.id);
+    }
     return this.listDocuments(verification.id);
   }
 
-  async createPresign(driverId: string, dto: PresignDocumentDto) {
-    const verification = await this.assertCanUpload(
-      driverId,
-      dto.documentType,
+  /**
+   * Dispatch eligibility: APPROVED KYC only. Unverified or pending drivers
+   * must not receive marketplace offers even if they are still ONLINE.
+   */
+  async filterApprovedDriverIds(driverIds: string[]): Promise<Set<string>> {
+    const unique = [...new Set(driverIds.filter(Boolean))];
+    if (!unique.length) return new Set();
+    const rows = await this.verifications.find({
+      where: { driverId: In(unique), status: VerificationStatus.APPROVED },
+      select: { driverId: true },
+    });
+    return new Set(rows.map((row) => row.driverId));
+  }
+
+  /**
+   * Rider-facing driver photos: the latest non-rejected KYC selfie, keyed
+   * by driver id. License / ID / insurance are never included.
+   */
+  async mapDriverPhotoUrls(driverIds: string[]): Promise<Map<string, string>> {
+    const unique = [...new Set(driverIds.filter(Boolean))];
+    const urls = new Map<string, string>();
+    if (!unique.length) return urls;
+
+    const verifications = await this.verifications.find({
+      where: { driverId: In(unique) },
+      order: { submittedAt: 'DESC' },
+    });
+    const latestByDriver = new Map<string, DriverVerification>();
+    for (const row of verifications) {
+      if (!latestByDriver.has(row.driverId)) {
+        latestByDriver.set(row.driverId, row);
+      }
+    }
+    const verificationIds = [...latestByDriver.values()].map((row) => row.id);
+    if (!verificationIds.length) return urls;
+
+    const selfies = await this.documents.find({
+      where: {
+        driverVerificationId: In(verificationIds),
+        documentType: 'selfie',
+      },
+      order: { submittedAt: 'DESC' },
+    });
+    const selfieByVerification = new Map<string, DocumentSubmission>();
+    for (const doc of selfies) {
+      if (doc.status === DocumentReviewStatus.REJECTED) continue;
+      if (!selfieByVerification.has(doc.driverVerificationId)) {
+        selfieByVerification.set(doc.driverVerificationId, doc);
+      }
+    }
+
+    await Promise.all(
+      [...latestByDriver.entries()].map(async ([driverId, verification]) => {
+        const doc = selfieByVerification.get(verification.id);
+        if (!doc) return;
+        urls.set(
+          driverId,
+          await this.storage.createClientViewUrl(doc.storageKey),
+        );
+      }),
     );
+    return urls;
+  }
+
+  /**
+   * Store a replacement car for ops review. The live vehicles row is not
+   * touched until they approve. License / ID / selfie stay locked.
+   */
+  async requestVehicleChange(driverId: string, dto: VehicleChangeDto) {
+    const verification = await this.getMyVerification(driverId);
+    if (verification.status === VerificationStatus.REJECTED) {
+      throw new ConflictException(
+        'This application was rejected. Start a new KYC application first.',
+      );
+    }
+    if (verification.status !== VerificationStatus.APPROVED) {
+      throw new ConflictException(
+        'Finish your current application first, then add a vehicle for review.',
+      );
+    }
+
+    const make = dto.make.trim();
+    const model = dto.model.trim();
+    const plate = dto.plate.trim();
+    const color = dto.color?.trim() || null;
+    if (!make || !model || !plate) {
+      throw new BadRequestException('Make, model and plate are required');
+    }
+
+    const current = await this.vehicles.findOne({ where: { driverId } });
+    if (
+      current &&
+      current.make.trim().toLowerCase() === make.toLowerCase() &&
+      current.model.trim().toLowerCase() === model.toLowerCase() &&
+      current.plate.trim().toLowerCase() === plate.toLowerCase()
+    ) {
+      throw new ConflictException(
+        'This vehicle is already on file and cannot be edited.',
+      );
+    }
+
+    verification.vehicleChangePending = true;
+    verification.pendingVehicleMake = make;
+    verification.pendingVehicleModel = model;
+    verification.pendingVehiclePlate = plate;
+    verification.pendingVehicleColor = color;
+    verification.pendingVehicleYear = dto.year ?? verification.vehicleYear;
+    verification.missingInsurance = true;
+    await this.verifications.save(verification);
+
+    const vehicleDocs = await this.documents.find({
+      where: {
+        driverVerificationId: verification.id,
+        documentType: In([...VEHICLE_CHANGE_DOC_TYPES]),
+      },
+    });
+    for (const doc of vehicleDocs) {
+      if (doc.status === DocumentReviewStatus.APPROVED) {
+        doc.status = DocumentReviewStatus.RESUBMISSION_REQUESTED;
+      }
+    }
+    if (vehicleDocs.length) {
+      await this.documents.save(vehicleDocs);
+    }
+
+    await this.complianceAlerts.save(
+      this.complianceAlerts.create({
+        driverId,
+        title: 'Vehicle change requested',
+        description: `${make} ${model} • ${plate} is waiting on registration and insurance review.`,
+        severity: AlertSeverity.MEDIUM,
+        status: AlertStatus.OPEN,
+      }),
+    );
+
+    await this.recordAudit(
+      driverId,
+      'driver',
+      'kyc.vehicle_change',
+      verification.id,
+      {
+        make,
+        model,
+        plate,
+      },
+    );
+
+    return verification;
+  }
+
+  async createPresign(driverId: string, dto: PresignDocumentDto) {
+    const verification = await this.assertCanUpload(driverId, dto.documentType);
 
     const storageKey = this.storage.buildObjectKey(
       driverId,
@@ -211,10 +371,7 @@ export class KycService {
   }
 
   async confirmUpload(driverId: string, dto: ConfirmDocumentDto) {
-    const verification = await this.assertCanUpload(
-      driverId,
-      dto.documentType,
-    );
+    const verification = await this.assertCanUpload(driverId, dto.documentType);
     if (!dto.storageKey.startsWith(`kyc/${driverId}/`)) {
       throw new ForbiddenException('Invalid storage key');
     }
@@ -234,10 +391,14 @@ export class KycService {
       }
     } else if (!pending && this.storage.storageMode === 's3') {
       // S3 PUT does not clear Redis until confirm; require pending token.
-      throw new BadRequestException('Upload session expired — request a new presign');
+      throw new BadRequestException(
+        'Upload session expired — request a new presign',
+      );
     }
 
     await this.storage.markUploaded(dto.storageKey);
+
+    const expiresAt = this.parseRequiredExpiry(dto.documentType, dto.expiresAt);
 
     const prior = await this.documents.find({
       where: {
@@ -245,7 +406,9 @@ export class KycService {
         documentType: dto.documentType,
       },
     });
-    const replacingExpired = prior.some((doc) => this.isExpired(doc));
+    const replacingExpired = prior.some((doc) =>
+      isKycDocumentExpired(doc.expiresAt),
+    );
     if (prior.length) {
       await this.documents.remove(prior);
     }
@@ -257,7 +420,8 @@ export class KycService {
         category: dto.category,
         storageKey: dto.storageKey,
         status: DocumentReviewStatus.QUEUED,
-        expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
+        expiresAt,
+        reviewedAt: null,
       }),
     );
 
@@ -279,10 +443,16 @@ export class KycService {
       );
     }
 
-    await this.recordAudit(driverId, 'driver', 'kyc.document_upload', saved.id, {
-      documentType: dto.documentType,
-      storageKey: dto.storageKey,
-    });
+    await this.recordAudit(
+      driverId,
+      'driver',
+      'kyc.document_upload',
+      saved.id,
+      {
+        documentType: dto.documentType,
+        storageKey: dto.storageKey,
+      },
+    );
 
     return {
       ...saved,
@@ -295,8 +465,8 @@ export class KycService {
   }
 
   /**
-   * After approval: add a missing type or replace an existing file any time.
-   * Rejected applications must start a new KYC first.
+   * Missing types can still be added. Approved files stay on file with their
+   * dates until they expire or ops requests a resubmission.
    */
   private async assertCanUpload(driverId: string, documentType: string) {
     const verification = await this.getMyVerification(driverId);
@@ -304,6 +474,13 @@ export class KycService {
       throw new ConflictException(
         'This application was rejected. Start a new KYC application first.',
       );
+    }
+
+    if (
+      verification.status === VerificationStatus.APPROVED &&
+      !verification.vehicleChangePending
+    ) {
+      await this.markDocumentsApproved(verification.id);
     }
 
     const existing = await this.documents.findOne({
@@ -314,19 +491,55 @@ export class KycService {
       order: { submittedAt: 'DESC' },
     });
 
-    if (verification.status !== VerificationStatus.APPROVED) {
-      return verification;
-    }
-
-    if (!existing) {
-      return verification;
+    if (existing && isApprovedKycDocumentLocked(existing)) {
+      throw new ConflictException(
+        'This document is approved and cannot be changed. Dates stay on file until it expires.',
+      );
     }
 
     return verification;
   }
 
-  private isExpired(doc: DocumentSubmission) {
-    return !!doc.expiresAt && doc.expiresAt.getTime() < Date.now();
+  private parseRequiredExpiry(documentType: string, raw?: string): Date | null {
+    if (!raw) {
+      if (documentRequiresExpiry(documentType)) {
+        throw new BadRequestException(
+          'Expiry date is required for this document',
+        );
+      }
+      return null;
+    }
+
+    const expiresAt = new Date(raw);
+    if (Number.isNaN(expiresAt.getTime())) {
+      throw new BadRequestException('Expiry date is invalid');
+    }
+    if (
+      documentRequiresExpiry(documentType) &&
+      expiresAt.getTime() <= Date.now()
+    ) {
+      throw new BadRequestException('Expiry date must be in the future');
+    }
+    return expiresAt;
+  }
+
+  private async markDocumentsApproved(verificationId: string) {
+    const docs = await this.documents.find({
+      where: { driverVerificationId: verificationId },
+    });
+    const reviewedAt = new Date();
+    const changed = docs.filter(
+      (doc) =>
+        doc.status === DocumentReviewStatus.QUEUED ||
+        doc.status === DocumentReviewStatus.UNDER_REVIEW,
+    );
+    for (const doc of changed) {
+      doc.status = DocumentReviewStatus.APPROVED;
+      doc.reviewedAt = reviewedAt;
+    }
+    if (changed.length) {
+      await this.documents.save(changed);
+    }
   }
 
   private async refreshMissingFlags(verificationId: string) {
@@ -336,7 +549,7 @@ export class KycService {
     });
     const types = new Set(
       docs
-        .filter((d) => !this.isExpired(d))
+        .filter((d) => !isKycDocumentExpired(d.expiresAt))
         .map((d) => d.documentType),
     );
     verification.missingId = !types.has('national_id') && !types.has('license');
@@ -344,12 +557,19 @@ export class KycService {
     await this.verifications.save(verification);
   }
 
-  async assign(id: string, agentId: string, actorId: string, actorRole: string) {
+  async assign(
+    id: string,
+    agentId: string,
+    actorId: string,
+    actorRole: string,
+  ) {
     const verification = await this.getVerification(id);
     verification.assignedToId = agentId;
     verification.status = VerificationStatus.IN_REVIEW;
     await this.verifications.save(verification);
-    await this.recordAudit(actorId, actorRole, 'kyc.assign', verification.id, { agentId });
+    await this.recordAudit(actorId, actorRole, 'kyc.assign', verification.id, {
+      agentId,
+    });
     return verification;
   }
 
@@ -362,6 +582,13 @@ export class KycService {
     const verification = await this.getVerification(id);
 
     if (
+      verification.status === VerificationStatus.APPROVED &&
+      verification.vehicleChangePending
+    ) {
+      return this.decideVehicleChange(verification, dto, actorId, actorRole);
+    }
+
+    if (
       verification.status === VerificationStatus.APPROVED ||
       verification.status === VerificationStatus.REJECTED
     ) {
@@ -371,10 +598,13 @@ export class KycService {
     switch (dto.decision) {
       case ReviewDecision.APPROVE:
         verification.status = VerificationStatus.APPROVED;
+        await this.markDocumentsApproved(verification.id);
+        await this.applyPendingVehicle(verification);
         break;
       case ReviewDecision.REJECT:
         verification.status = VerificationStatus.REJECTED;
         verification.rejectionReason = dto.reason ?? null;
+        this.clearPendingVehicle(verification);
         break;
       case ReviewDecision.ESCALATE:
         verification.status = VerificationStatus.ESCALATED;
@@ -384,11 +614,118 @@ export class KycService {
     }
 
     await this.verifications.save(verification);
-    await this.recordAudit(actorId, actorRole, `kyc.${dto.decision}`, verification.id, {
-      reason: dto.reason,
-    });
+    await this.recordAudit(
+      actorId,
+      actorRole,
+      `kyc.${dto.decision}`,
+      verification.id,
+      {
+        reason: dto.reason,
+      },
+    );
 
     return verification;
+  }
+
+  private async decideVehicleChange(
+    verification: DriverVerification,
+    dto: ReviewDecisionDto,
+    actorId: string,
+    actorRole: string,
+  ) {
+    switch (dto.decision) {
+      case ReviewDecision.APPROVE:
+        await this.applyPendingVehicle(verification);
+        await this.markDocumentsApproved(verification.id);
+        break;
+      case ReviewDecision.REJECT:
+        this.clearPendingVehicle(verification);
+        await this.rejectQueuedVehicleDocs(verification.id);
+        break;
+      case ReviewDecision.ESCALATE:
+        verification.escalationReason = dto.reason ?? null;
+        verification.escalatedToId = dto.escalateToId ?? null;
+        break;
+    }
+
+    await this.verifications.save(verification);
+    await this.recordAudit(
+      actorId,
+      actorRole,
+      `kyc.vehicle_change.${dto.decision}`,
+      verification.id,
+      { reason: dto.reason },
+    );
+    return verification;
+  }
+
+  private async applyPendingVehicle(verification: DriverVerification) {
+    const make = verification.pendingVehicleMake?.trim();
+    const model = verification.pendingVehicleModel?.trim();
+    const plate = verification.pendingVehiclePlate?.trim();
+    if (!make || !model || !plate) {
+      this.clearPendingVehicle(verification);
+      return;
+    }
+
+    let vehicle = await this.vehicles.findOne({
+      where: { driverId: verification.driverId },
+    });
+    if (!vehicle) {
+      vehicle = this.vehicles.create({
+        driverId: verification.driverId,
+        make,
+        model,
+        plate,
+        capacity: 4,
+        color: verification.pendingVehicleColor,
+      });
+    } else {
+      vehicle.make = make;
+      vehicle.model = model;
+      vehicle.plate = plate;
+      if (verification.pendingVehicleColor) {
+        vehicle.color = verification.pendingVehicleColor;
+      }
+    }
+    await this.vehicles.save(vehicle);
+
+    verification.licenseNumber = plate;
+    verification.vehicleType = `${make} ${model}`.trim();
+    if (verification.pendingVehicleYear) {
+      verification.vehicleYear = verification.pendingVehicleYear;
+    }
+    this.clearPendingVehicle(verification);
+  }
+
+  private clearPendingVehicle(verification: DriverVerification) {
+    verification.vehicleChangePending = false;
+    verification.pendingVehicleMake = null;
+    verification.pendingVehicleModel = null;
+    verification.pendingVehiclePlate = null;
+    verification.pendingVehicleColor = null;
+    verification.pendingVehicleYear = null;
+  }
+
+  private async rejectQueuedVehicleDocs(verificationId: string) {
+    const docs = await this.documents.find({
+      where: {
+        driverVerificationId: verificationId,
+        documentType: In([...VEHICLE_CHANGE_DOC_TYPES]),
+      },
+    });
+    const changed = docs.filter(
+      (doc) =>
+        doc.status === DocumentReviewStatus.QUEUED ||
+        doc.status === DocumentReviewStatus.UNDER_REVIEW ||
+        doc.status === DocumentReviewStatus.RESUBMISSION_REQUESTED,
+    );
+    for (const doc of changed) {
+      doc.status = DocumentReviewStatus.REJECTED;
+    }
+    if (changed.length) {
+      await this.documents.save(changed);
+    }
   }
 
   async listComplianceAlerts(status?: AlertStatus) {
@@ -409,7 +746,13 @@ export class KycService {
     if (!alert) throw new NotFoundException('Alert not found');
     alert.status = AlertStatus.RESOLVED;
     await this.complianceAlerts.save(alert);
-    await this.recordAudit(actorId, actorRole, 'compliance.resolve', alert.id, {});
+    await this.recordAudit(
+      actorId,
+      actorRole,
+      'compliance.resolve',
+      alert.id,
+      {},
+    );
     return alert;
   }
 
@@ -425,7 +768,9 @@ export class KycService {
       .take(MAX_LIST_ROWS)
       .getMany();
 
-    const verificationIds = [...new Set(docs.map((d) => d.driverVerificationId))];
+    const verificationIds = [
+      ...new Set(docs.map((d) => d.driverVerificationId)),
+    ];
     const verifications =
       verificationIds.length === 0
         ? []

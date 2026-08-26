@@ -38,13 +38,27 @@ export class BookingController {
 
   @UseGuards(JwtAuthGuard, SubscriptionAccessGuard)
   @Post(':id/accept')
-  accept(@CurrentUser() user: { userId: string }, @Param('id') id: string) {
-    return this.bookingService.driverRespond(user.userId, id, 'accept' as DriverDecision);
+  accept(
+    @CurrentUser() user: { userId: string },
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.bookingService.driverRespond(
+      user.userId,
+      id,
+      'accept' as DriverDecision,
+    );
   }
 
   @UseGuards(JwtAuthGuard, SubscriptionAccessGuard)
   @Post(':id/decline')
-  decline(@CurrentUser() user: { userId: string }, @Param('id') id: string) {
-    return this.bookingService.driverRespond(user.userId, id, 'decline' as DriverDecision);
+  decline(
+    @CurrentUser() user: { userId: string },
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.bookingService.driverRespond(
+      user.userId,
+      id,
+      'decline' as DriverDecision,
+    );
   }
 }

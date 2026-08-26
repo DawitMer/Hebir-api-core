@@ -126,6 +126,14 @@ class EnvironmentVariables {
   @IsIn(['true', 'false'])
   REQUIRE_DRIVER_SUBSCRIPTION?: string;
 
+  /**
+   * When `true`, drivers without APPROVED KYC cannot go online.
+   * Default off for local demos; enable in production.
+   */
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  REQUIRE_DRIVER_KYC?: string;
+
   /** Hours after ride completion during which tips are accepted (default 48). */
   @IsOptional()
   @IsInt()
@@ -215,6 +223,16 @@ class EnvironmentVariables {
   @IsInt()
   @Min(1)
   RATE_LIMIT_RIDE_REQUEST?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  RATE_LIMIT_RIDE_MUTATE?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  RATE_LIMIT_FARE_ESTIMATE?: number;
 
   /**
    * Local-only: allow Socket.IO clients to declare their own userId when they
@@ -307,7 +325,7 @@ class EnvironmentVariables {
   @IsString()
   METRICS_TOKEN?: string;
 
-  /** `twilio` or `http`. Required in production (OTP send is fail-closed). */
+  /** `afromessage`, `geezsms`, `twilio`, or `http`. Required in production. */
   @IsOptional()
   @IsString()
   SMS_PROVIDER?: string;
@@ -327,6 +345,39 @@ class EnvironmentVariables {
   @IsOptional()
   @IsString()
   SMS_HTTP_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  AFROMESSAGE_TOKEN?: string;
+
+  @IsOptional()
+  @IsString()
+  AFROMESSAGE_FROM?: string;
+
+  @IsOptional()
+  @IsString()
+  AFROMESSAGE_SENDER?: string;
+
+  @IsOptional()
+  @IsString()
+  GEEZSMS_TOKEN?: string;
+
+  @IsOptional()
+  @IsString()
+  GEEZSMS_SHORTCODE_ID?: string;
+
+  @IsOptional()
+  @IsString()
+  CHAPA_SECRET_KEY?: string;
+
+  @IsOptional()
+  @IsString()
+  CHAPA_WEBHOOK_SECRET?: string;
+
+  /** Full service-account JSON for FCM HTTP v1. */
+  @IsOptional()
+  @IsString()
+  FCM_SERVICE_ACCOUNT_JSON?: string;
 
   @IsOptional()
   @IsIn(['true', 'false'])
@@ -377,7 +428,10 @@ export function validate(config: Record<string, unknown>) {
         'Refusing to start: CORS_ORIGINS must be set in production (comma-separated portal origins)',
       );
     }
-    if (!validatedConfig.METRICS_TOKEN?.trim() || validatedConfig.METRICS_TOKEN.length < 16) {
+    if (
+      !validatedConfig.METRICS_TOKEN?.trim() ||
+      validatedConfig.METRICS_TOKEN.length < 16
+    ) {
       throw new Error(
         'Refusing to start: METRICS_TOKEN must be set in production (≥16 chars) to protect /metrics',
       );
@@ -385,6 +439,63 @@ export function validate(config: Record<string, unknown>) {
     if (!validatedConfig.LOCATION_SVC_TOKEN?.trim()) {
       throw new Error(
         'Refusing to start: LOCATION_SVC_TOKEN must be set in production (shared secret with location-svc)',
+      );
+    }
+
+    const redisUrl = validatedConfig.REDIS_URL?.trim();
+    const redisHost = validatedConfig.REDIS_HOST?.trim().toLowerCase();
+    const redisLoopback =
+      !redisHost ||
+      redisHost === '127.0.0.1' ||
+      redisHost === 'localhost' ||
+      redisHost === '::1';
+    if (!redisUrl && redisLoopback) {
+      throw new Error(
+        'Refusing to start: set REDIS_URL (or a non-loopback REDIS_HOST) in production',
+      );
+    }
+
+    const smsProvider =
+      validatedConfig.SMS_PROVIDER?.trim().toLowerCase() ?? '';
+    const allowedSms = new Set([
+      'afromessage',
+      'geezsms',
+      'twilio',
+      'http',
+      'webhook',
+    ]);
+    if (!allowedSms.has(smsProvider)) {
+      throw new Error(
+        'Refusing to start: SMS_PROVIDER must be afromessage, geezsms, twilio, or http in production (OTP login is fail-closed)',
+      );
+    }
+    if (
+      smsProvider === 'afromessage' &&
+      !validatedConfig.AFROMESSAGE_TOKEN?.trim()
+    ) {
+      throw new Error(
+        'Refusing to start: AfroMessage SMS requires AFROMESSAGE_TOKEN',
+      );
+    }
+    if (smsProvider === 'geezsms' && !validatedConfig.GEEZSMS_TOKEN?.trim()) {
+      throw new Error('Refusing to start: GeezSMS requires GEEZSMS_TOKEN');
+    }
+    if (smsProvider === 'twilio') {
+      const sid = validatedConfig.TWILIO_ACCOUNT_SID?.trim();
+      const token = validatedConfig.TWILIO_AUTH_TOKEN?.trim();
+      const from = validatedConfig.TWILIO_FROM?.trim();
+      if (!sid || !token || !from) {
+        throw new Error(
+          'Refusing to start: Twilio SMS requires TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_FROM',
+        );
+      }
+    }
+    if (
+      (smsProvider === 'http' || smsProvider === 'webhook') &&
+      !validatedConfig.SMS_HTTP_URL?.trim()
+    ) {
+      throw new Error(
+        'Refusing to start: SMS_HTTP_URL is required when SMS_PROVIDER=http',
       );
     }
   }

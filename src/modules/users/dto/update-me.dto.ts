@@ -1,4 +1,12 @@
-import { IsArray, IsInt, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsInt,
+  IsOptional,
+  IsString,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 export class UpdateMeDto {
   @IsOptional()
@@ -15,6 +23,7 @@ export class UpdateMeDto {
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(20)
   savedPlaces?: Array<Record<string, unknown>>;
 
   @IsOptional()

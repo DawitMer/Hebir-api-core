@@ -8,9 +8,7 @@ import { bootstrappedFromBaseline } from '../migration-utils';
  * `driverId` alone. driver_subscriptions is OneToOne, so make it a UNIQUE
  * index: dedupe any stray rows first, then enforce one subscription per driver.
  */
-export class UniqueSubscriptionPerDriver1786554000000
-  implements MigrationInterface
-{
+export class UniqueSubscriptionPerDriver1786554000000 implements MigrationInterface {
   name = 'UniqueSubscriptionPerDriver1786554000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

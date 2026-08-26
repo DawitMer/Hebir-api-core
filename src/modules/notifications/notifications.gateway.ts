@@ -4,7 +4,7 @@ import {
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
-import { Inject, Logger } from '@nestjs/common';
+import { Inject, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
@@ -12,7 +12,8 @@ import Redis from 'ioredis';
 import { REDIS_CLIENT } from '../../redis/redis.module';
 import { buildSocketCors } from '../../config/security.config';
 import { AuthService } from '../auth/auth.service';
-import { AccountStanding } from '../auth/entities/user-account.entity';
+import { isAccountClosed } from '../auth/entities/user-account.entity';
+import { PushService } from '../push/push.service';
 
 const NOTIFICATIONS_CHANNEL = 'notifications';
 
@@ -29,7 +30,9 @@ type SocketWithUser = Socket & { data: { userId?: string } };
  * another user's ride offers and pickup addresses.
  */
 @WebSocketGateway({ cors: buildSocketCors() })
-export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class NotificationsGateway
+  implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
+{
   private readonly logger = new Logger(NotificationsGateway.name);
   private readonly userSockets = new Map<string, Set<string>>();
   private readonly subscriber: Redis;
@@ -42,6 +45,7 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     private readonly jwt: JwtService,
     private readonly authService: AuthService,
+    private readonly push: PushService,
     config: ConfigService,
   ) {
     // Escape hatch for local demos whose clients still connect with only a
@@ -97,6 +101,14 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
     if (sockets.size === 0) this.userSockets.delete(userId);
   }
 
+  async onModuleDestroy() {
+    try {
+      await this.subscriber.quit();
+    } catch {
+      this.subscriber.disconnect();
+    }
+  }
+
   /**
    * Same rules as the HTTP JwtStrategy: valid access token, jti not
    * revoked, account still exists and is not banned. A suspended user must
@@ -114,17 +126,21 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
         if (payload.typ && payload.typ !== 'access') return null;
         if (!payload.sub) return null;
         if (await this.authService.isAccessJtiDenied(payload.jti)) {
-          this.logger.warn(`Rejected socket with revoked token (user ${payload.sub})`);
+          this.logger.warn(
+            `Rejected socket with revoked token (user ${payload.sub})`,
+          );
           return null;
         }
         const context = await this.authService.getAuthContext(payload.sub);
-        if (!context || context.standing === AccountStanding.BANNED) {
-          this.logger.warn(`Rejected socket for banned/deleted user ${payload.sub}`);
+        if (!context || isAccountClosed(context.standing)) {
+          this.logger.warn(`Rejected socket for closed account ${payload.sub}`);
           return null;
         }
         return payload.sub;
       } catch (error) {
-        this.logger.warn(`Rejected socket with invalid token: ${error.message}`);
+        this.logger.warn(
+          `Rejected socket with invalid token: ${error.message}`,
+        );
         return null;
       }
     }
@@ -135,14 +151,20 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
   }
 
   private extractToken(socket: SocketWithUser): string | null {
-    const fromAuth = (socket.handshake.auth as { token?: unknown } | undefined)?.token;
-    if (typeof fromAuth === 'string' && fromAuth) return fromAuth.replace(/^Bearer /i, '');
+    const fromAuth = (socket.handshake.auth as { token?: unknown } | undefined)
+      ?.token;
+    if (typeof fromAuth === 'string' && fromAuth)
+      return fromAuth.replace(/^Bearer /i, '');
 
     const fromQuery = socket.handshake.query.token;
-    if (typeof fromQuery === 'string' && fromQuery) return fromQuery.replace(/^Bearer /i, '');
+    if (typeof fromQuery === 'string' && fromQuery)
+      return fromQuery.replace(/^Bearer /i, '');
 
     const header = socket.handshake.headers.authorization;
-    if (typeof header === 'string' && header.toLowerCase().startsWith('bearer ')) {
+    if (
+      typeof header === 'string' &&
+      header.toLowerCase().startsWith('bearer ')
+    ) {
       return header.slice(7);
     }
     return null;
@@ -162,5 +184,10 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
       NOTIFICATIONS_CHANNEL,
       JSON.stringify({ userId, event, payload }),
     );
+    void this.push.notifyEvent(userId, event, payload).catch((error) => {
+      this.logger.warn(
+        `FCM ${event} → ${userId} failed: ${(error as Error).message}`,
+      );
+    });
   }
 }

@@ -7,7 +7,10 @@ import {
   UserAccount,
   UserRole,
 } from '../auth/entities/user-account.entity';
-import { DriverProfile, DriverStatus } from '../rides/entities/driver-profile.entity';
+import {
+  DriverProfile,
+  DriverStatus,
+} from '../rides/entities/driver-profile.entity';
 import { Vehicle } from '../rides/entities/vehicle.entity';
 import { Ride, RideStatus } from '../rides/entities/ride.entity';
 import {
@@ -36,15 +39,18 @@ export class AdminService {
   constructor(
     private readonly config: ConfigService,
     private readonly locationSvc: LocationSvcClient,
-    @InjectRepository(UserAccount) private readonly users: Repository<UserAccount>,
+    @InjectRepository(UserAccount)
+    private readonly users: Repository<UserAccount>,
     @InjectRepository(DriverProfile)
     private readonly driverProfiles: Repository<DriverProfile>,
     @InjectRepository(Vehicle) private readonly vehicles: Repository<Vehicle>,
     @InjectRepository(Ride) private readonly rides: Repository<Ride>,
     @InjectRepository(DriverVerification)
     private readonly verifications: Repository<DriverVerification>,
-    @InjectRepository(AuditTrail) private readonly audit: Repository<AuditTrail>,
-    @InjectRepository(FareRecord) private readonly fares: Repository<FareRecord>,
+    @InjectRepository(AuditTrail)
+    private readonly audit: Repository<AuditTrail>,
+    @InjectRepository(FareRecord)
+    private readonly fares: Repository<FareRecord>,
     @InjectRepository(DriverExpense)
     private readonly expenses: Repository<DriverExpense>,
     @InjectRepository(DriverLocationHistory)
@@ -109,9 +115,7 @@ export class AdminService {
   }
 
   async listApplications(status?: string) {
-    const where = status
-      ? { status: status as VerificationStatus }
-      : {};
+    const where = status ? { status: status as VerificationStatus } : {};
     const rows = await this.verifications.find({
       where,
       order: { submittedAt: 'ASC' },
@@ -168,7 +172,9 @@ export class AdminService {
         referenceId: u.tin || u.phoneNumber,
         location: u.username ? `@${u.username}` : '—',
         status: u.standing,
-        category: u.roles?.includes(UserRole.DRIVER) ? 'drivers' : 'applications',
+        category: u.roles?.includes(UserRole.DRIVER)
+          ? 'drivers'
+          : 'applications',
         linkedProfileId: u.id,
         searchTerms: [u.fullName, u.username, u.phoneNumber, u.tin].filter(
           Boolean,
@@ -192,7 +198,9 @@ export class AdminService {
         status: r.status,
         category: 'trips' as const,
         linkedProfileId: r.driverId ?? r.riderId,
-        searchTerms: [r.pickupAddress, r.dropoffAddress, r.status].filter(Boolean),
+        searchTerms: [r.pickupAddress, r.dropoffAddress, r.status].filter(
+          Boolean,
+        ),
       })),
     ];
   }
@@ -250,7 +258,9 @@ export class AdminService {
         },
         take: LIVE_MAP_PIN_LIMIT,
       });
-      pinIds = activeProfiles.map((p) => p.userId).filter((id) => UUID_RE.test(id));
+      pinIds = activeProfiles
+        .map((p) => p.userId)
+        .filter((id) => UUID_RE.test(id));
     }
 
     const [users, profiles] = pinIds.length

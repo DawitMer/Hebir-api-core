@@ -21,7 +21,9 @@ export function parseCorsOrigins(raw: string | undefined): string[] {
     .filter(Boolean);
 }
 
-export function resolveAllowedOrigins(env: NodeJS.ProcessEnv = process.env): string[] {
+export function resolveAllowedOrigins(
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
   const configured = parseCorsOrigins(env.CORS_ORIGINS);
   if (configured.length > 0) return configured;
   if (env.NODE_ENV === 'production') {
@@ -57,7 +59,9 @@ export function corsOriginDelegate(
   callback(null, false);
 }
 
-export function buildCorsOptions(env: NodeJS.ProcessEnv = process.env): CorsOptions {
+export function buildCorsOptions(
+  env: NodeJS.ProcessEnv = process.env,
+): CorsOptions {
   return {
     origin: (origin: string | undefined, callback: OriginCallback) =>
       corsOriginDelegate(origin, callback, env),

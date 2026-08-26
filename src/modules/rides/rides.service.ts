@@ -8,11 +8,19 @@ import {
   NotFoundException,
   ServiceUnavailableException,
   UnauthorizedException,
+  UnprocessableEntityException,
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { In, LessThan, MoreThan, Not, QueryFailedError, Repository } from 'typeorm';
+import {
+  In,
+  LessThan,
+  MoreThan,
+  Not,
+  QueryFailedError,
+  Repository,
+} from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomInt } from 'crypto';
 import Redis from 'ioredis';
@@ -23,14 +31,20 @@ import { RideMessage } from './entities/ride-message.entity';
 import { FareRecord } from './entities/fare-record.entity';
 import { Vehicle } from './entities/vehicle.entity';
 import { DriverProfile, DriverStatus } from './entities/driver-profile.entity';
-import { DriverEarning, EarningSourceType, PayoutStatus } from './entities/driver-earning.entity';
-import { PaymentRecord, PaymentStatus, PaymentType } from './entities/payment-record.entity';
+import {
+  DriverEarning,
+  EarningSourceType,
+  PayoutStatus,
+} from './entities/driver-earning.entity';
+import { PaymentRecord, PaymentType } from './entities/payment-record.entity';
 import { Tip } from '../tips/entities/tip.entity';
 import { UserAccount, UserRole } from '../auth/entities/user-account.entity';
 import { RequestRideDto } from './dto/request-ride.dto';
 import { DriverInitiatedRideDto } from './dto/driver-initiated-ride.dto';
 import { FareService } from '../fare/fare.service';
 import { SubscriptionService } from '../subscription/subscription.service';
+import { KycService } from '../kyc/kyc.service';
+import { VerificationStatus } from '../kyc/entities/driver-verification.entity';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
 import { GeoPoint } from '../matching/entities/trip.entity';
 import { haversineKm, zoneIdFor } from '../matching/geo/geo.util';
@@ -45,6 +59,26 @@ import {
 import { DispatchQueueService } from './dispatch/dispatch.queue.service';
 import { LocationSvcClient } from '../../common/location-svc/location-svc.client';
 import { GeocodingService } from '../../common/geocoding/geocoding.service';
+import {
+  clearLiveTrack,
+  liveTrackFromRide,
+  writeLiveTrack,
+} from './ride-live-track';
+import {
+  ARRIVE_RADIUS_M,
+  COMPLETE_RADIUS_M,
+  START_RADIUS_M,
+  metresBetween,
+} from './ride-geofence';
+import {
+  DRIVER_ONLY_TRANSITIONS,
+  isClientRideTransitionAllowed,
+} from './ride-state';
+import { remainingEta } from './remaining-eta';
+import {
+  FARE_PAYMENT_PROVIDER,
+  PaymentProvider,
+} from '../payments/payment-provider';
 
 export type EnrichedRide = Ride & {
   fare: FareRecord | null;
@@ -52,7 +86,10 @@ export type EnrichedRide = Ride & {
   driver: {
     fullName: string | null;
     username: string | null;
+    phoneNumber?: string | null;
     rating: number;
+    /** Signed / HMAC selfie URL from KYC. Null when the driver has no photo. */
+    photoUrl?: string | null;
   } | null;
   vehicle: {
     make: string;
@@ -70,32 +107,6 @@ export type EnrichedRide = Ride & {
 type OfferOutcome = 'accepted' | 'declined' | 'timeout' | 'stale';
 
 export type RideViewer = { userId: string; roles?: UserRole[] };
-
-/**
- * Client-facing PATCH /rides/:id/status edges only.
- * Dispatch (`offered`/`matched`) and accept live on dedicated methods so a
- * rider/driver cannot forge those states through the generic patch.
- * `cancelled` is routed to cancelRide() before this table is consulted.
- * `completed` is exclusive to completeRide().
- */
-const RIDE_TRANSITIONS: Record<RideStatus, RideStatus[]> = {
-  [RideStatus.REQUESTED]: [],
-  [RideStatus.SEARCHING]: [],
-  [RideStatus.OFFERED]: [],
-  [RideStatus.MATCHED]: [],
-  [RideStatus.ACCEPTED]: [RideStatus.ARRIVING],
-  [RideStatus.ARRIVING]: [RideStatus.IN_PROGRESS],
-  [RideStatus.IN_PROGRESS]: [],
-  [RideStatus.COMPLETED]: [],
-  [RideStatus.CANCELLED]: [],
-  [RideStatus.UNMATCHED]: [],
-};
-
-/** Only the assigned driver reports physical progress towards the rider. */
-const DRIVER_ONLY_TRANSITIONS = new Set<RideStatus>([
-  RideStatus.ARRIVING,
-  RideStatus.IN_PROGRESS,
-]);
 
 /** GPS samples older than this are not trustworthy for dispatch fallback. */
 const STALE_LOCATION_SECONDS = 600;
@@ -172,10 +183,12 @@ export class RidesService {
     private readonly rideStatusEvents: Repository<RideStatusEvent>,
     @InjectRepository(RideMessage)
     private readonly rideMessages: Repository<RideMessage>,
-    @InjectRepository(FareRecord) private readonly fares: Repository<FareRecord>,
+    @InjectRepository(FareRecord)
+    private readonly fares: Repository<FareRecord>,
     @InjectRepository(Vehicle) private readonly vehicles: Repository<Vehicle>,
     @InjectRepository(Tip) private readonly tips: Repository<Tip>,
-    @InjectRepository(UserAccount) private readonly users: Repository<UserAccount>,
+    @InjectRepository(UserAccount)
+    private readonly users: Repository<UserAccount>,
     @InjectRepository(DriverProfile)
     private readonly driverProfiles: Repository<DriverProfile>,
     @InjectRepository(DriverEarning)
@@ -184,6 +197,7 @@ export class RidesService {
     private readonly payments: Repository<PaymentRecord>,
     private readonly fareService: FareService,
     private readonly subscriptionService: SubscriptionService,
+    private readonly kycService: KycService,
     private readonly notifications: NotificationsGateway,
     private readonly config: ConfigService,
     private readonly locationSvc: LocationSvcClient,
@@ -191,6 +205,8 @@ export class RidesService {
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(forwardRef(() => DispatchQueueService))
     private readonly dispatchQueue: DispatchQueueService,
+    @Inject(FARE_PAYMENT_PROVIDER)
+    private readonly farePayments: PaymentProvider,
   ) {}
 
   /**
@@ -257,8 +273,13 @@ export class RidesService {
       }
       throw error;
     }
-    await this.logEvent(ride.id, RideStatus.SEARCHING, 'Ride requested; dispatch starting');
+    await this.logEvent(
+      ride.id,
+      RideStatus.SEARCHING,
+      'Ride requested; dispatch starting',
+    );
     this.logger.log(`Ride ${ride.id}: requested by rider ${riderId}`);
+    this.recordOnDemandRequest(dto.pickup);
 
     try {
       await this.dispatchQueue.enqueueDispatch(ride.id);
@@ -378,7 +399,10 @@ export class RidesService {
       };
       await this.dispatchQueue.saveState(rideId, state);
 
-      const offerResult = await this.beginOfferToDriver(rideId, candidate.userId);
+      const offerResult = await this.beginOfferToDriver(
+        rideId,
+        candidate.userId,
+      );
       if (offerResult === 'busy') {
         // Stale Redis lock / driver left ONLINE between eligibility and
         // reserve — keep searching; do not clear dispatch state.
@@ -508,11 +532,19 @@ export class RidesService {
       await this.releaseDriverLock(driverId, rideId);
       return 'busy';
     }
-    await this.logEvent(rideId, RideStatus.OFFERED, `Offered to driver ${driverId}`);
+    await this.logEvent(
+      rideId,
+      RideStatus.OFFERED,
+      `Offered to driver ${driverId}`,
+    );
 
     const ride = await this.rides.findOne({ where: { id: rideId } });
     if (ride) {
-      await this.notify(driverId, 'ride.offer', await this.buildOfferPayload(ride));
+      await this.notify(
+        driverId,
+        'ride.offer',
+        await this.buildOfferPayload(ride),
+      );
       await this.notify(ride.riderId, 'ride.status_changed', {
         rideId,
         status: RideStatus.OFFERED,
@@ -564,6 +596,14 @@ export class RidesService {
     this.logger.log(
       `Dispatch ${rideId}: driver ${driverId} outcome=${outcome}, continuing`,
     );
+    const searching = await this.rides.findOne({ where: { id: rideId } });
+    if (searching?.status === RideStatus.SEARCHING) {
+      await this.notify(searching.riderId, 'ride.status_changed', {
+        rideId,
+        status: RideStatus.SEARCHING,
+        reason: outcome,
+      });
+    }
 
     const state = await this.dispatchQueue.loadState(rideId);
     if (state && !state.triedDriverIds.includes(driverId)) {
@@ -595,6 +635,16 @@ export class RidesService {
     if (ride.offerDriverId !== driverId || ride.status !== RideStatus.OFFERED) {
       throw new ConflictException('This ride is not currently offered to you');
     }
+    if (!(await this.subscriptionService.mayAccessMarketplace(driverId))) {
+      try {
+        await this.declineOffer(driverId, rideId);
+      } catch {
+        // Offer may have expired while the paywall check ran.
+      }
+      throw new ForbiddenException(
+        'Active subscription required to accept trips',
+      );
+    }
     if (!ride.offerExpiresAt || ride.offerExpiresAt.getTime() <= Date.now()) {
       throw new ConflictException('This offer has expired');
     }
@@ -619,12 +669,18 @@ export class RidesService {
     if (!claimed.affected) {
       throw new ConflictException('This ride is no longer offered to you');
     }
-    await this.logEvent(rideId, RideStatus.MATCHED, `Driver ${driverId} accepted offer`);
+    await this.logEvent(
+      rideId,
+      RideStatus.MATCHED,
+      `Driver ${driverId} accepted offer`,
+    );
 
-    // Only a still-reserved profile may flip to on_trip. If cancel already
-    // freed the driver (RESERVED → ONLINE), the ride is gone — abort.
+    // Transition the driver to on_trip from RESERVED (or ONLINE).
     const onTrip = await this.driverProfiles.update(
-      { userId: driverId, status: DriverStatus.RESERVED },
+      {
+        userId: driverId,
+        status: In([DriverStatus.RESERVED, DriverStatus.ONLINE]),
+      },
       { status: DriverStatus.ON_TRIP },
     );
     if (!onTrip.affected) {
@@ -656,7 +712,8 @@ export class RidesService {
       throw new ConflictException('Ride was cancelled during accept');
     }
 
-    const accepted = (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
+    const accepted =
+      (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
     await this.logEvent(
       rideId,
       RideStatus.ACCEPTED,
@@ -664,6 +721,7 @@ export class RidesService {
     );
 
     const [enriched] = await this.enrichRides([accepted]);
+    await writeLiveTrack(this.redis, driverId, liveTrackFromRide(accepted));
     await this.notify(accepted.riderId, 'ride.matched', {
       rideId,
       driverId,
@@ -675,7 +733,9 @@ export class RidesService {
 
     await this.releaseDriverLock(driverId, rideId);
 
-    this.logger.log(`Ride ${rideId}: accepted by driver ${driverId} (matched -> accepted)`);
+    this.logger.log(
+      `Ride ${rideId}: accepted by driver ${driverId} (matched -> accepted)`,
+    );
     return enriched;
   }
 
@@ -684,10 +744,17 @@ export class RidesService {
    * cancel that won the profile row. Clear a leftover MATCHED row if we
    * still own it so the rider is not stuck with a phantom match.
    */
-  private async abortAcceptAfterCancel(rideId: string, driverId: string): Promise<void> {
+  private async abortAcceptAfterCancel(
+    rideId: string,
+    driverId: string,
+  ): Promise<void> {
     const aborted = await this.rides.update(
       { id: rideId, status: RideStatus.MATCHED, driverId },
-      { status: RideStatus.CANCELLED, offerDriverId: null, offerExpiresAt: null },
+      {
+        status: RideStatus.CANCELLED,
+        offerDriverId: null,
+        offerExpiresAt: null,
+      },
     );
     await this.dispatchQueue.clearState(rideId);
     await this.releaseDriverLock(driverId, rideId);
@@ -728,9 +795,22 @@ export class RidesService {
     if (!released.affected) {
       throw new ConflictException('This ride is no longer offered to you');
     }
-    await this.logEvent(rideId, RideStatus.SEARCHING, `Driver ${driverId} declined offer`);
+    await this.logEvent(
+      rideId,
+      RideStatus.SEARCHING,
+      `Driver ${driverId} declined offer`,
+    );
 
     await this.releaseOfferedDriver(driverId, rideId);
+
+    const searching = await this.rides.findOne({ where: { id: rideId } });
+    if (searching) {
+      await this.notify(searching.riderId, 'ride.status_changed', {
+        rideId,
+        status: RideStatus.SEARCHING,
+        reason: 'declined',
+      });
+    }
 
     const state = await this.dispatchQueue.loadState(rideId);
     if (state && !state.triedDriverIds.includes(driverId)) {
@@ -765,8 +845,11 @@ export class RidesService {
       throw new ForbiddenException('You are not a participant on this ride');
     }
 
-    const allowed = RIDE_TRANSITIONS[ride.status] ?? [];
-    if (!allowed.includes(nextStatus)) {
+    if (ride.status === nextStatus) {
+      return ride;
+    }
+
+    if (!isClientRideTransitionAllowed(ride.status, nextStatus)) {
       throw new ConflictException(
         `Cannot transition ride from ${ride.status} to ${nextStatus}`,
       );
@@ -777,10 +860,31 @@ export class RidesService {
       );
     }
 
+    if (nextStatus === RideStatus.ARRIVING && ride.driverId) {
+      await this.assertDriverWithin(
+        ride.driverId,
+        ride.pickup,
+        ARRIVE_RADIUS_M,
+        'mark arrived',
+        'pickup',
+      );
+    }
+    if (nextStatus === RideStatus.IN_PROGRESS && ride.driverId) {
+      await this.assertDriverWithin(
+        ride.driverId,
+        ride.pickup,
+        START_RADIUS_M,
+        'start the trip',
+        'pickup',
+      );
+    }
+
     // Driver-initiated trips require POST /rides/:id/start with the rider's code.
+    // The gate is the ride row (Postgres), not Redis — a cache flush must not
+    // let the driver PATCH past the PIN.
     if (
       nextStatus === RideStatus.IN_PROGRESS &&
-      (await this.hasStartCodeGate(rideId))
+      this.rideHasStartCodeGate(ride)
     ) {
       throw new ForbiddenException(
         'Enter the rider security code to start this trip',
@@ -794,15 +898,23 @@ export class RidesService {
     }
     // Guarding on the status we validated makes the transition table
     // authoritative even when two clients patch the same ride at once.
-    const moved = await this.rides.update({ id: rideId, status: previousStatus }, patch);
+    const moved = await this.rides.update(
+      { id: rideId, status: previousStatus },
+      patch,
+    );
     if (!moved.affected) {
+      const current = await this.rides.findOne({ where: { id: rideId } });
+      if (current?.status === nextStatus) {
+        return current;
+      }
       throw new ConflictException(
         `Ride changed state concurrently; retry from ${nextStatus === RideStatus.IN_PROGRESS ? 'arriving' : previousStatus}`,
       );
     }
     await this.logEvent(rideId, nextStatus, `Transitioned by ${actorId}`);
 
-    const counterpartId = actorId === ride.riderId ? ride.driverId : ride.riderId;
+    const counterpartId =
+      actorId === ride.riderId ? ride.driverId : ride.riderId;
     if (counterpartId) {
       await this.notify(counterpartId, 'ride.status_changed', {
         rideId,
@@ -813,7 +925,16 @@ export class RidesService {
     this.logger.log(
       `Ride ${rideId}: ${previousStatus} -> ${nextStatus} (by ${actorId})`,
     );
-    return (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
+    const updated =
+      (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
+    if (updated.driverId) {
+      await writeLiveTrack(
+        this.redis,
+        updated.driverId,
+        liveTrackFromRide(updated),
+      );
+    }
+    return updated;
   }
 
   /**
@@ -838,9 +959,18 @@ export class RidesService {
       );
     }
 
+    await this.assertDriverWithin(
+      driverId,
+      ride.dropoff,
+      COMPLETE_RADIUS_M,
+      'complete the trip',
+      'destination',
+    );
+
     const distanceKm = ride.distanceM
       ? ride.distanceM / 1000
-      : this.fareService.quotedTripMetrics(ride.pickup, ride.dropoff).distanceKm;
+      : this.fareService.quotedTripMetrics(ride.pickup, ride.dropoff)
+          .distanceKm;
     const quotedMinutes = ride.durationS
       ? ride.durationS / 60
       : this.fareService.estimateDurationMinutes(distanceKm);
@@ -906,8 +1036,12 @@ export class RidesService {
         }),
       );
 
-      // Fares are collected in cash by the driver — no PSP confirms them.
-      // Recorded as pending/cash so reports never claim settled money.
+      const settled = await this.farePayments.settleFare({
+        rideId,
+        riderId: ride.riderId,
+        amountEtb: fareRecord.total,
+        idempotencyKey: `fare:${rideId}`,
+      });
       await em.save(
         em.create(PaymentRecord, {
           userId: ride.riderId,
@@ -915,8 +1049,8 @@ export class RidesService {
           type: PaymentType.FARE,
           amount: fareRecord.total,
           idempotencyKey: `fare:${rideId}`,
-          status: PaymentStatus.PENDING,
-          providerReference: 'cash',
+          status: settled.status,
+          providerReference: settled.providerReference,
           applicationFeeAmount: '0',
         }),
       );
@@ -951,13 +1085,20 @@ export class RidesService {
       rideId,
       fare: fareTotal,
     });
+    await clearLiveTrack(this.redis, driverId);
 
-    this.logger.log(`Ride ${rideId}: completed by driver ${driverId}, fare=${fareTotal}`);
+    this.logger.log(
+      `Ride ${rideId}: completed by driver ${driverId}, fare=${fareTotal}`,
+    );
     return (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
   }
 
   /** Either participant can cancel until the trip physically starts. */
-  async cancelRide(rideId: string, actorId: string, reason?: string): Promise<Ride> {
+  async cancelRide(
+    rideId: string,
+    actorId: string,
+    reason?: string,
+  ): Promise<Ride> {
     const ride = await this.rides.findOne({ where: { id: rideId } });
     if (!ride) throw new NotFoundException('Ride not found');
     if (ride.riderId !== actorId && ride.driverId !== actorId) {
@@ -968,12 +1109,31 @@ export class RidesService {
       ride.status === RideStatus.CANCELLED ||
       ride.status === RideStatus.UNMATCHED
     ) {
+      if (
+        ride.status === RideStatus.CANCELLED ||
+        ride.status === RideStatus.UNMATCHED
+      ) {
+        return ride;
+      }
       throw new ConflictException(`Ride is already ${ride.status}`);
     }
     if (ride.status === RideStatus.IN_PROGRESS) {
       // A trip that physically started must end via complete — cancelling it
       // would erase the fare and the trip record.
-      throw new ConflictException('A trip in progress cannot be cancelled; complete it instead');
+      throw new ConflictException(
+        'A trip in progress cannot be cancelled; complete it instead',
+      );
+    }
+
+    const streetHail = this.rideHasStartCodeGate(ride);
+    const driverDropRematch =
+      actorId === ride.driverId &&
+      !streetHail &&
+      (ride.status === RideStatus.MATCHED ||
+        ride.status === RideStatus.ACCEPTED ||
+        ride.status === RideStatus.ARRIVING);
+    if (driverDropRematch) {
+      return this.rematchAfterDriverCancel(ride, actorId, reason);
     }
 
     const heldDriverId = ride.driverId ?? ride.offerDriverId;
@@ -998,10 +1158,16 @@ export class RidesService {
     );
     if (!cancelled.affected) {
       const current = await this.rides.findOne({ where: { id: rideId } });
-      throw new ConflictException(`Ride is already ${current?.status ?? 'closed'}`);
+      throw new ConflictException(
+        `Ride is already ${current?.status ?? 'closed'}`,
+      );
     }
-    await this.logEvent(rideId, RideStatus.CANCELLED, reason ?? `Cancelled by ${actorId}`);
-    await this.redis.del(this.startCodeKey(rideId));
+    await this.logEvent(
+      rideId,
+      RideStatus.CANCELLED,
+      reason ?? `Cancelled by ${actorId}`,
+    );
+    await this.clearStartCode(rideId);
 
     if (heldDriverId) {
       // A cancel can land while the driver is reserved (live offer) or already
@@ -1016,12 +1182,98 @@ export class RidesService {
 
     await this.dispatchQueue.clearState(rideId);
 
-    const counterpartId = actorId === ride.riderId ? heldDriverId : ride.riderId;
+    const counterpartId =
+      actorId === ride.riderId ? heldDriverId : ride.riderId;
     if (counterpartId) {
       await this.notify(counterpartId, 'ride.cancelled', { rideId, reason });
     }
 
     this.logger.log(`Ride ${rideId}: cancelled by ${actorId}`);
+    return (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
+  }
+
+  /**
+   * Driver dropped the trip before it started. Keep the same ride id so the
+   * rider stays in matching instead of booking again from scratch. Street-hail
+   * (start-code) trips stay cancelled — those are not a marketplace search.
+   */
+  private async rematchAfterDriverCancel(
+    ride: Ride,
+    driverId: string,
+    reason?: string,
+  ): Promise<Ride> {
+    const rideId = ride.id;
+    const reset = await this.rides.update(
+      {
+        id: rideId,
+        driverId,
+        status: In([
+          RideStatus.MATCHED,
+          RideStatus.ACCEPTED,
+          RideStatus.ARRIVING,
+        ]),
+      },
+      {
+        status: RideStatus.SEARCHING,
+        driverId: null,
+        offerDriverId: null,
+        offerExpiresAt: null,
+        matchedAt: null,
+      },
+    );
+    if (!reset.affected) {
+      const current = await this.rides.findOne({ where: { id: rideId } });
+      if (
+        current &&
+        (current.status === RideStatus.SEARCHING ||
+          current.status === RideStatus.OFFERED ||
+          current.status === RideStatus.CANCELLED ||
+          current.status === RideStatus.UNMATCHED)
+      ) {
+        return current;
+      }
+      throw new ConflictException(
+        `Ride is already ${current?.status ?? 'closed'}`,
+      );
+    }
+
+    await this.logEvent(
+      rideId,
+      RideStatus.SEARCHING,
+      reason ?? `Driver ${driverId} cancelled; rematching`,
+    );
+    await this.clearStartCode(rideId);
+
+    await this.releaseDriverToOnline(driverId, [
+      DriverStatus.RESERVED,
+      DriverStatus.ON_TRIP,
+    ]);
+    await this.releaseDriverLock(driverId, rideId);
+
+    await this.dispatchQueue.clearState(rideId);
+    try {
+      await this.dispatchQueue.enqueueDispatch(rideId, 0, [driverId]);
+    } catch (error) {
+      this.logger.error(
+        `Ride ${rideId}: rematch enqueue failed: ${(error as Error).message}`,
+      );
+      await this.markUnmatched(rideId);
+      await this.notify(ride.riderId, 'ride.unmatched', { rideId });
+      return (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
+    }
+
+    await this.notify(ride.riderId, 'ride.rematching', {
+      rideId,
+      reason: reason ?? 'Driver cancelled',
+    });
+    await this.notify(ride.riderId, 'ride.status_changed', {
+      rideId,
+      status: RideStatus.SEARCHING,
+    });
+
+    this.logger.log(
+      `Ride ${rideId}: rematching after driver ${driverId} cancelled`,
+    );
     return (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
   }
 
@@ -1048,7 +1300,8 @@ export class RidesService {
   private async buildOfferPayload(ride: Ride) {
     const distanceKm = ride.distanceM
       ? ride.distanceM / 1000
-      : this.fareService.quotedTripMetrics(ride.pickup, ride.dropoff).distanceKm;
+      : this.fareService.quotedTripMetrics(ride.pickup, ride.dropoff)
+          .distanceKm;
     const durationMinutes = ride.durationS
       ? ride.durationS / 60
       : this.fareService.estimateDurationMinutes(distanceKm);
@@ -1083,7 +1336,10 @@ export class RidesService {
     };
   }
 
-  async listRidesForRider(riderId: string, limit = 50): Promise<EnrichedRide[]> {
+  async listRidesForRider(
+    riderId: string,
+    limit = 50,
+  ): Promise<EnrichedRide[]> {
     const rides = await this.rides.find({
       where: { riderId },
       order: { createdAt: 'DESC' },
@@ -1097,19 +1353,58 @@ export class RidesService {
     );
   }
 
+  /** Driver trip history — `GET /rides/mine` when the JWT has the driver role. */
+  async listRidesForDriver(
+    driverId: string,
+    limit = 50,
+  ): Promise<EnrichedRide[]> {
+    const rides = await this.rides.find({
+      where: { driverId },
+      order: { createdAt: 'DESC' },
+      take: Math.min(Math.max(1, limit), MAX_RIDE_PAGE),
+    });
+    const enriched = await this.enrichRides(rides);
+    return Promise.all(
+      enriched.map((ride, index) =>
+        this.attachStartCodeForViewer(ride, rides[index], driverId),
+      ),
+    );
+  }
+
   /**
-   * Live assigned ride for a driver (accepted → in_progress). Used to resume
+   * Live assigned ride for a driver (matched → in_progress). Used to resume
    * after the app is killed mid-trip so End Trip can still settle the fare.
    */
+  async getActiveRideForRider(riderId: string): Promise<EnrichedRide | null> {
+    const ride = await this.rides.findOne({
+      where: { riderId, status: In(ACTIVE_RIDE_STATUSES) },
+      order: { updatedAt: 'DESC' },
+    });
+    if (!ride) return null;
+    const [enriched] = await this.enrichRides([ride]);
+    return this.attachStartCodeForViewer(enriched, ride, riderId);
+  }
+
+  /**
+   * Dual-role accounts: a driver who also requested a ride as a rider must
+   * still recover the rider trip when they have no live assignment.
+   */
+  async getActiveRideForUser(
+    userId: string,
+    roles: UserRole[] = [],
+  ): Promise<EnrichedRide | null> {
+    if (roles.includes(UserRole.DRIVER) || roles.includes(UserRole.ADMIN)) {
+      const asDriver = await this.getActiveRideForDriver(userId);
+      if (asDriver) return asDriver;
+    }
+    return this.getActiveRideForRider(userId);
+  }
+
   async getActiveRideForDriver(driverId: string): Promise<EnrichedRide | null> {
     const ride = await this.rides.findOne({
       where: {
         driverId,
-        status: In([
-          RideStatus.ACCEPTED,
-          RideStatus.ARRIVING,
-          RideStatus.IN_PROGRESS,
-        ]),
+        status: In(LIVE_DRIVER_TRIP_STATUSES),
       },
       order: { updatedAt: 'DESC' },
     });
@@ -1160,7 +1455,9 @@ export class RidesService {
       throw new NotFoundException('No ህብር account found for that phone number');
     }
     if (rider.id === driverId) {
-      throw new ConflictException('You cannot start a trip with your own account');
+      throw new ConflictException(
+        'You cannot start a trip with your own account',
+      );
     }
 
     await this.assertStreetHailProximity(rider.id, driverLocation);
@@ -1224,7 +1521,8 @@ export class RidesService {
     driverId: string,
     dto: DriverInitiatedRideDto,
   ): Promise<EnrichedRide> {
-    const mayDrive = await this.subscriptionService.mayAccessMarketplace(driverId);
+    const mayDrive =
+      await this.subscriptionService.mayAccessMarketplace(driverId);
     if (!mayDrive) {
       throw new ForbiddenException(
         'Active subscription required to start trips for riders',
@@ -1238,7 +1536,9 @@ export class RidesService {
       throw new NotFoundException('No ህብር account found for that phone number');
     }
     if (rider.id === driverId) {
-      throw new ConflictException('You cannot start a trip with your own account');
+      throw new ConflictException(
+        'You cannot start a trip with your own account',
+      );
     }
 
     const riderBusy = await this.rides.findOne({
@@ -1356,6 +1656,7 @@ export class RidesService {
     );
 
     const [enriched] = await this.enrichRides([ride]);
+    await writeLiveTrack(this.redis, driverId, liveTrackFromRide(ride));
     await this.notify(rider.id, 'ride.driver_initiated', {
       rideId: ride.id,
       startCode,
@@ -1414,6 +1715,14 @@ export class RidesService {
       );
     }
 
+    await this.assertDriverWithin(
+      driverId,
+      ride.pickup,
+      START_RADIUS_M,
+      'start the trip',
+      'pickup',
+    );
+
     await this.consumeStartCode(rideId, startCode);
 
     if (ride.status === RideStatus.ACCEPTED) {
@@ -1421,7 +1730,11 @@ export class RidesService {
         { id: rideId, status: RideStatus.ACCEPTED },
         { status: RideStatus.ARRIVING },
       );
-      await this.logEvent(rideId, RideStatus.ARRIVING, 'Arrived for start-code gate');
+      await this.logEvent(
+        rideId,
+        RideStatus.ARRIVING,
+        'Arrived for start-code gate',
+      );
     }
 
     const previous =
@@ -1454,6 +1767,13 @@ export class RidesService {
 
     const updated =
       (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
+    if (updated.driverId) {
+      await writeLiveTrack(
+        this.redis,
+        updated.driverId,
+        liveTrackFromRide(updated),
+      );
+    }
     const [enriched] = await this.enrichRides([updated]);
     return { ...enriched, requiresStartCode: false, startCode: null };
   }
@@ -1463,20 +1783,59 @@ export class RidesService {
   }
 
   private async storeStartCode(rideId: string, plain: string): Promise<void> {
+    const hash = this.hashStartCode(rideId, plain);
+    const expiresAt = new Date(Date.now() + START_CODE_TTL_SEC * 1000);
+    await this.rides.update(
+      { id: rideId },
+      {
+        startCodeHash: hash,
+        startCodeAttempts: 0,
+        startCodeExpiresAt: expiresAt,
+      },
+    );
     const record: StartCodeRecord = {
-      hash: this.hashStartCode(rideId, plain),
+      hash,
       plain,
       attempts: 0,
     };
-    await this.redis.setex(
-      this.startCodeKey(rideId),
-      START_CODE_TTL_SEC,
-      JSON.stringify(record),
-    );
+    try {
+      await this.redis.setex(
+        this.startCodeKey(rideId),
+        START_CODE_TTL_SEC,
+        JSON.stringify(record),
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Start-code display cache failed for ${rideId}: ${(error as Error).message}`,
+      );
+    }
   }
 
-  private async hasStartCodeGate(rideId: string): Promise<boolean> {
-    return (await this.redis.exists(this.startCodeKey(rideId))) === 1;
+  private rideHasStartCodeGate(
+    ride: Pick<Ride, 'startCodeHash' | 'startCodeExpiresAt'>,
+  ): boolean {
+    if (!ride.startCodeHash) return false;
+    if (
+      ride.startCodeExpiresAt &&
+      ride.startCodeExpiresAt.getTime() <= Date.now()
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  private async clearStartCode(rideId: string): Promise<void> {
+    await this.rides.update(
+      { id: rideId },
+      { startCodeHash: null, startCodeAttempts: 0, startCodeExpiresAt: null },
+    );
+    try {
+      await this.redis.del(this.startCodeKey(rideId));
+    } catch (error) {
+      this.logger.warn(
+        `Start-code cache delete failed for ${rideId}: ${(error as Error).message}`,
+      );
+    }
   }
 
   private async readStartCode(rideId: string): Promise<StartCodeRecord | null> {
@@ -1490,28 +1849,49 @@ export class RidesService {
   }
 
   private async consumeStartCode(rideId: string, code: string): Promise<void> {
-    const key = this.startCodeKey(rideId);
-    const record = await this.readStartCode(rideId);
-    if (!record) {
-      throw new UnauthorizedException('Security code expired — ask the rider to reopen the app');
+    const ride = await this.rides.findOne({ where: { id: rideId } });
+    if (!ride || !this.rideHasStartCodeGate(ride)) {
+      throw new UnauthorizedException(
+        'Security code expired — ask the rider to reopen the app',
+      );
     }
-    if (record.attempts >= START_CODE_MAX_ATTEMPTS) {
-      await this.redis.del(key);
+    if ((ride.startCodeAttempts ?? 0) >= START_CODE_MAX_ATTEMPTS) {
+      await this.clearStartCode(rideId);
       throw new UnauthorizedException(
         'Too many incorrect codes — cancel and create the trip again',
       );
     }
-    if (record.hash !== this.hashStartCode(rideId, code)) {
-      record.attempts += 1;
-      const ttl = await this.redis.ttl(key);
-      await this.redis.setex(
-        key,
-        ttl > 0 ? ttl : START_CODE_TTL_SEC,
-        JSON.stringify(record),
+    if (ride.startCodeHash !== this.hashStartCode(rideId, code)) {
+      const rows: Array<{ startCodeAttempts: number }> = await this.rides.query(
+        `UPDATE rides
+            SET "startCodeAttempts" = "startCodeAttempts" + 1
+          WHERE id = $1 AND "startCodeHash" IS NOT NULL
+          RETURNING "startCodeAttempts"`,
+        [rideId],
       );
+      const attempts = Number(rows[0]?.startCodeAttempts ?? 0);
+      if (attempts >= START_CODE_MAX_ATTEMPTS) {
+        await this.clearStartCode(rideId);
+        throw new UnauthorizedException(
+          'Too many incorrect codes — cancel and create the trip again',
+        );
+      }
       throw new UnauthorizedException('Incorrect security code');
     }
-    await this.redis.del(key);
+    const consumed = await this.rides.update(
+      { id: rideId, startCodeHash: ride.startCodeHash },
+      { startCodeHash: null, startCodeAttempts: 0, startCodeExpiresAt: null },
+    );
+    if (!consumed.affected) {
+      throw new UnauthorizedException(
+        'Security code expired — ask the rider to reopen the app',
+      );
+    }
+    try {
+      await this.redis.del(this.startCodeKey(rideId));
+    } catch {
+      // Display cache only — the Postgres gate is already consumed.
+    }
   }
 
   private hashStartCode(rideId: string, code: string): string {
@@ -1527,19 +1907,19 @@ export class RidesService {
     ride: Ride,
     viewerId: string,
   ): Promise<EnrichedRide> {
-    const record = await this.readStartCode(ride.id);
     const gated =
-      !!record &&
+      this.rideHasStartCodeGate(ride) &&
       (ride.status === RideStatus.ACCEPTED ||
         ride.status === RideStatus.ARRIVING);
     if (!gated) {
       return { ...enriched, requiresStartCode: false, startCode: null };
     }
+    const record = await this.readStartCode(ride.id);
     if (viewerId === ride.riderId) {
       return {
         ...enriched,
         requiresStartCode: true,
-        startCode: record.plain,
+        startCode: record?.plain ?? null,
       };
     }
     // Driver / staff: know a code is required, never see the digits.
@@ -1555,22 +1935,26 @@ export class RidesService {
 
     const rideIds = rides.map((ride) => ride.id);
     const driverIds = [
-      ...new Set(rides.map((ride) => ride.driverId).filter((id): id is string => !!id)),
+      ...new Set(
+        rides.map((ride) => ride.driverId).filter((id): id is string => !!id),
+      ),
     ];
 
-    const [fares, tips, drivers, vehicles, profiles] = await Promise.all([
-      this.fares.find({ where: { rideId: In(rideIds) } }),
-      this.tips.find({ where: { rideId: In(rideIds) } }),
-      driverIds.length
-        ? this.users.find({ where: { id: In(driverIds) } })
-        : Promise.resolve<UserAccount[]>([]),
-      driverIds.length
-        ? this.vehicles.find({ where: { driverId: In(driverIds) } })
-        : Promise.resolve<Vehicle[]>([]),
-      driverIds.length
-        ? this.driverProfiles.find({ where: { userId: In(driverIds) } })
-        : Promise.resolve<DriverProfile[]>([]),
-    ]);
+    const [fares, tips, drivers, vehicles, profiles, photoByDriver] =
+      await Promise.all([
+        this.fares.find({ where: { rideId: In(rideIds) } }),
+        this.tips.find({ where: { rideId: In(rideIds) } }),
+        driverIds.length
+          ? this.users.find({ where: { id: In(driverIds) } })
+          : Promise.resolve<UserAccount[]>([]),
+        driverIds.length
+          ? this.vehicles.find({ where: { driverId: In(driverIds) } })
+          : Promise.resolve<Vehicle[]>([]),
+        driverIds.length
+          ? this.driverProfiles.find({ where: { userId: In(driverIds) } })
+          : Promise.resolve<DriverProfile[]>([]),
+        this.kycService.mapDriverPhotoUrls(driverIds),
+      ]);
 
     const fareByRide = new Map(fares.map((fare) => [fare.rideId, fare]));
     const tipByRide = new Map(tips.map((tip) => [tip.rideId, tip]));
@@ -1585,8 +1969,12 @@ export class RidesService {
     return rides.map((ride) => {
       const tip = tipByRide.get(ride.id);
       const driver = ride.driverId ? driverById.get(ride.driverId) : undefined;
-      const vehicle = ride.driverId ? vehicleByDriver.get(ride.driverId) : undefined;
-      const profile = ride.driverId ? profileByDriver.get(ride.driverId) : undefined;
+      const vehicle = ride.driverId
+        ? vehicleByDriver.get(ride.driverId)
+        : undefined;
+      const profile = ride.driverId
+        ? profileByDriver.get(ride.driverId)
+        : undefined;
 
       return {
         ...ride,
@@ -1594,13 +1982,22 @@ export class RidesService {
         // driver an open offer went to before that driver accepts.
         offerDriverId: null,
         offerExpiresAt: null,
+        startCodeHash: null,
+        startCodeAttempts: 0,
+        startCodeExpiresAt: null,
         fare: fareByRide.get(ride.id) ?? null,
         tipAmount: tip ? Number(tip.amount) : 0,
         driver: driver
           ? {
               fullName: driver.fullName,
               username: driver.username,
+              // Exposed only after assignment so the rider can place a call
+              // during an active trip (privacy: never present on open offers).
+              phoneNumber: driver.phoneNumber ?? null,
               rating: Number(profile?.ratingAvg ?? 0),
+              photoUrl: ride.driverId
+                ? (photoByDriver.get(ride.driverId) ?? null)
+                : null,
             }
           : null,
         vehicle: vehicle
@@ -1624,7 +2021,11 @@ export class RidesService {
     const closed = await this.rides.update(
       {
         id: rideId,
-        status: In([RideStatus.SEARCHING, RideStatus.OFFERED, RideStatus.REQUESTED]),
+        status: In([
+          RideStatus.SEARCHING,
+          RideStatus.OFFERED,
+          RideStatus.REQUESTED,
+        ]),
       },
       {
         status: RideStatus.UNMATCHED,
@@ -1633,7 +2034,11 @@ export class RidesService {
       },
     );
     if (!closed.affected) return;
-    await this.logEvent(rideId, RideStatus.UNMATCHED, 'Dispatch window elapsed with no driver');
+    await this.logEvent(
+      rideId,
+      RideStatus.UNMATCHED,
+      'Dispatch window elapsed with no driver',
+    );
 
     // The window can elapse while an offer is still open; without this the
     // driver would stay `reserved` forever and never be offered another ride.
@@ -1643,10 +2048,16 @@ export class RidesService {
 
     await this.notify(ride.riderId, 'ride.unmatched', { rideId });
     await this.dispatchQueue.clearState(rideId);
-    this.logger.warn(`Ride ${rideId}: unmatched — dispatch window elapsed with no driver`);
+    this.logger.warn(
+      `Ride ${rideId}: unmatched — dispatch window elapsed with no driver`,
+    );
   }
 
-  private async logEvent(rideId: string, status: RideStatus, note?: string): Promise<void> {
+  private async logEvent(
+    rideId: string,
+    status: RideStatus,
+    note?: string,
+  ): Promise<void> {
     await this.rideStatusEvents.save(
       this.rideStatusEvents.create({ rideId, status, note: note ?? null }),
     );
@@ -1656,12 +2067,148 @@ export class RidesService {
    * Notifications are advisory: a Redis pub/sub failure must not abort a
    * dispatch job or roll a caller's state transition back.
    */
-  private async notify(userId: string, event: string, payload: unknown): Promise<void> {
+  private async notify(
+    userId: string,
+    event: string,
+    payload: unknown,
+  ): Promise<void> {
     try {
       await this.notifications.notify(userId, event, payload);
     } catch (error) {
-      this.logger.warn(`notify ${event} → ${userId} failed: ${(error as Error).message}`);
+      this.logger.warn(
+        `notify ${event} → ${userId} failed: ${(error as Error).message}`,
+      );
     }
+  }
+
+  /** On-demand surge uses the same zone demand as shared matching. */
+  private recordOnDemandRequest(pickup: GeoPoint): void {
+    if (!this.locationSvc.enabled || this.locationSvc.isOpen) return;
+    void this.locationSvc
+      .post('/demand/request', { location: pickup }, 1000)
+      .catch((error: Error) => {
+        this.logger.warn(`on-demand demand signal failed: ${error.message}`);
+      });
+  }
+
+  /**
+   * Assigned-driver GPS for reconnect. Authorization is ride membership —
+   * never a raw driver id from the client.
+   */
+  async getAssignedDriverLocation(rideId: string, viewer: RideViewer) {
+    const ride = await this.rides.findOne({ where: { id: rideId } });
+    if (!ride) throw new NotFoundException('Ride not found');
+
+    const isParticipant =
+      ride.riderId === viewer.userId || ride.driverId === viewer.userId;
+    const isStaff = (viewer.roles ?? []).some(
+      (role) => role === UserRole.ADMIN || role === UserRole.GOV_OFFICER,
+    );
+    if (!isParticipant && !isStaff) {
+      throw new ForbiddenException('You are not a participant on this ride');
+    }
+    if (!ride.driverId) {
+      throw new NotFoundException('No driver assigned to this ride');
+    }
+    if (!LIVE_DRIVER_TRIP_STATUSES.includes(ride.status)) {
+      throw new ConflictException('This ride is not being tracked');
+    }
+    if (!this.locationSvc.enabled || this.locationSvc.isOpen) {
+      throw new ServiceUnavailableException('location-svc unavailable');
+    }
+    try {
+      const loc = await this.locationSvc.get<{
+        lat?: number;
+        lng?: number;
+        heading?: number | null;
+        speed?: number | null;
+        accuracy?: number | null;
+        timestampMs?: number;
+      }>(`/drivers/point/${ride.driverId}`, undefined, 1500);
+      const eta =
+        loc?.lat != null && loc?.lng != null
+          ? remainingEta({
+              driver: { lat: loc.lat, lng: loc.lng },
+              speedMps: loc.speed,
+              pickup: ride.pickup,
+              dropoff: ride.dropoff,
+              status: ride.status,
+              quotedDistanceM: ride.distanceM,
+              quotedDurationS: ride.durationS,
+            })
+          : null;
+      return { ...loc, ...eta };
+    } catch {
+      throw new NotFoundException('Driver location is not live');
+    }
+  }
+
+  /**
+   * Arrive / start / complete must happen near the pin. Landmark pickups in
+   * Addis plus cheap GNSS need a generous radius, not a lane-level fence.
+   */
+  private async assertDriverWithin(
+    driverId: string,
+    target: GeoPoint,
+    radiusM: number,
+    action: string,
+    place: 'pickup' | 'destination',
+  ): Promise<void> {
+    const point = await this.readLiveDriverPoint(driverId);
+    if (!point) {
+      if (this.config.get<string>('NODE_ENV') === 'production') {
+        throw new UnprocessableEntityException(
+          `GPS is required to ${action}. Wait for a location fix and try again.`,
+        );
+      }
+      this.logger.warn(
+        `geofence skipped for ${action}: no live GPS (non-production)`,
+      );
+      return;
+    }
+    const metres = metresBetween(point, target);
+    if (metres <= radiusM) return;
+    throw new UnprocessableEntityException(
+      `You are ${Math.round(metres)} m from the ${place}. Move within ${radiusM} m to ${action}.`,
+    );
+  }
+
+  private async readLiveDriverPoint(
+    driverId: string,
+  ): Promise<GeoPoint | null> {
+    if (this.locationSvc.enabled && !this.locationSvc.isOpen) {
+      try {
+        const loc = await this.locationSvc.get<{ lat?: number; lng?: number }>(
+          `/drivers/point/${driverId}`,
+          undefined,
+          1200,
+        );
+        if (loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lng)) {
+          return { lat: loc.lat as number, lng: loc.lng as number };
+        }
+      } catch {
+        // Fall through to the thinned Postgres history.
+      }
+    }
+    try {
+      const rows: Array<{ lat: number; lng: number }> = await this.rides.query(
+        `SELECT lat, lng
+           FROM driver_location_history
+          WHERE "driverId"::text = $1
+            AND "recordedAt" > NOW() - interval '90 seconds'
+          ORDER BY "recordedAt" DESC
+          LIMIT 1`,
+        [driverId],
+      );
+      if (rows[0] && Number.isFinite(Number(rows[0].lat))) {
+        return { lat: Number(rows[0].lat), lng: Number(rows[0].lng) };
+      }
+    } catch (error) {
+      this.logger.warn(
+        `geofence history lookup failed: ${(error as Error).message}`,
+      );
+    }
+    return null;
   }
 
   /**
@@ -1712,7 +2259,8 @@ export class RidesService {
     radiusKm: number,
   ): Promise<string[]> {
     const latDelta = radiusKm / 111;
-    const lngDelta = radiusKm / (111 * Math.max(0.1, Math.cos((pickup.lat * Math.PI) / 180)));
+    const lngDelta =
+      radiusKm / (111 * Math.max(0.1, Math.cos((pickup.lat * Math.PI) / 180)));
     try {
       const rows: Array<{ driverId: string; lat: number; lng: number }> =
         await this.driverProfiles.query(
@@ -1739,9 +2287,15 @@ export class RidesService {
       return rows
         .map((row) => ({
           driverId: row.driverId,
-          distanceKm: haversineKm(pickup, { lat: Number(row.lat), lng: Number(row.lng) }),
+          distanceKm: haversineKm(pickup, {
+            lat: Number(row.lat),
+            lng: Number(row.lng),
+          }),
         }))
-        .filter((row) => Number.isFinite(row.distanceKm) && row.distanceKm <= radiusKm)
+        .filter(
+          (row) =>
+            Number.isFinite(row.distanceKm) && row.distanceKm <= radiusKm,
+        )
         .sort((a, b) => a.distanceKm - b.distanceKm)
         .map((row) => row.driverId);
     } catch (error) {
@@ -1779,11 +2333,18 @@ export class RidesService {
       this.vehicles.find({ where: { driverId: In(candidateIds) } }),
     ]);
 
+    const kycApproved = this.isKycEnforced()
+      ? await this.kycService.filterApprovedDriverIds(
+          profiles.map((profile) => profile.userId),
+        )
+      : null;
+
     const vehicleByDriver = new Map(vehicles.map((v) => [v.driverId, v]));
     const wanted = (vehicleType ?? 'any').toLowerCase().trim();
 
     return profiles.filter((profile) => {
       if (!activeIds.has(profile.userId)) return false;
+      if (kycApproved && !kycApproved.has(profile.userId)) return false;
       if (!wanted || wanted === 'any') return true;
       const vehicle = vehicleByDriver.get(profile.userId);
       if (!vehicle) return false;
@@ -1825,7 +2386,9 @@ export class RidesService {
     eligible: DriverProfile[],
     nearestFirstDriverIds: string[],
   ): DriverProfile[] {
-    const etaRank = new Map(nearestFirstDriverIds.map((id, index) => [id, index]));
+    const etaRank = new Map(
+      nearestFirstDriverIds.map((id, index) => [id, index]),
+    );
 
     return [...eligible].sort((a, b) => {
       const etaDiff =
@@ -1920,14 +2483,31 @@ export class RidesService {
         await this.releaseDriverLock(ride.driverId, ride.id);
       }
       await this.dispatchQueue.clearState(ride.id);
+      if (ride.riderId) {
+        await this.notify(ride.riderId, 'ride.cancelled', {
+          rideId: ride.id,
+          reason: 'Matching could not be confirmed',
+        });
+        await this.notify(ride.riderId, 'ride.status_changed', {
+          rideId: ride.id,
+          status: RideStatus.CANCELLED,
+        });
+      }
       staleMatched += 1;
     }
 
     const freedDrivers =
-      (await this.freeAbandonedReservations()) + (await this.freeStuckOnTripDrivers());
+      (await this.freeAbandonedReservations()) +
+      (await this.freeStuckOnTripDrivers());
     const staleOnline = await this.offlineStaleGpsDrivers();
 
-    if (expiredOffers || unmatched || freedDrivers || staleMatched || staleOnline) {
+    if (
+      expiredOffers ||
+      unmatched ||
+      freedDrivers ||
+      staleMatched ||
+      staleOnline
+    ) {
       this.logger.warn(
         `Dispatch reaper: ${expiredOffers} expired offer(s), ${unmatched} unmatched, ` +
           `${staleMatched} stale matched, ${freedDrivers} driver(s) freed, ` +
@@ -1994,7 +2574,9 @@ export class RidesService {
       select: { offerDriverId: true },
     });
     const stillOffered = new Set(
-      liveOffers.map((ride) => ride.offerDriverId).filter((id): id is string => !!id),
+      liveOffers
+        .map((ride) => ride.offerDriverId)
+        .filter((id): id is string => !!id),
     );
 
     let freed = 0;
@@ -2030,7 +2612,9 @@ export class RidesService {
       select: { driverId: true },
     });
     const busy = new Set(
-      liveAssignments.map((ride) => ride.driverId).filter((id): id is string => !!id),
+      liveAssignments
+        .map((ride) => ride.driverId)
+        .filter((id): id is string => !!id),
     );
 
     let freed = 0;
@@ -2056,14 +2640,21 @@ export class RidesService {
     rideId: string,
     ttlMs: number,
   ): Promise<boolean> {
-    const result = await this.redis.set(
-      this.lockKey(driverId),
-      rideId,
-      'PX',
-      ttlMs,
-      'NX',
-    );
-    return result === 'OK';
+    try {
+      const result = await this.redis.set(
+        this.lockKey(driverId),
+        rideId,
+        'PX',
+        ttlMs,
+        'NX',
+      );
+      return result === 'OK';
+    } catch (error) {
+      this.logger.warn(
+        `Driver lock unavailable for ${driverId}: ${(error as Error).message}`,
+      );
+      return false;
+    }
   }
 
   /**
@@ -2071,7 +2662,10 @@ export class RidesService {
    * free a driver who has since been locked for a different one. Returns
    * true only when this ride still owned the lock.
    */
-  private async releaseDriverLock(driverId: string, rideId: string): Promise<boolean> {
+  private async releaseDriverLock(
+    driverId: string,
+    rideId: string,
+  ): Promise<boolean> {
     const deleted = await this.redis.eval(
       `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0`,
       1,
@@ -2087,7 +2681,10 @@ export class RidesService {
    * ownership stops a stale offer_check from freeing a driver who has since
    * been reserved for a different ride.
    */
-  private async releaseOfferedDriver(driverId: string, rideId: string): Promise<void> {
+  private async releaseOfferedDriver(
+    driverId: string,
+    rideId: string,
+  ): Promise<void> {
     const owned = await this.releaseDriverLock(driverId, rideId);
     if (owned) {
       await this.releaseDriverToOnline(driverId);
@@ -2121,6 +2718,7 @@ export class RidesService {
       { userId: driverId, status: In(from) },
       { status: DriverStatus.ONLINE, idleSince: new Date() },
     );
+    await clearLiveTrack(this.redis, driverId);
   }
 
   private async driverHasLiveTrip(driverId: string): Promise<boolean> {
@@ -2141,6 +2739,30 @@ export class RidesService {
     return count > 0;
   }
 
+  private isKycEnforced(): boolean {
+    const explicit = this.config.get<string>('REQUIRE_DRIVER_KYC');
+    if (explicit === 'true') return true;
+    if (explicit === 'false') return false;
+    return this.config.get<string>('NODE_ENV') === 'production';
+  }
+
+  private async assertKycAllowsOnline(driverId: string): Promise<void> {
+    if (!this.isKycEnforced()) return;
+    try {
+      const verification = await this.kycService.getMyVerification(driverId);
+      if (verification.status !== VerificationStatus.APPROVED) {
+        throw new ForbiddenException('KYC approval required to go online');
+      }
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw new ForbiddenException(
+          'Complete driver verification before going online',
+        );
+      }
+      throw error;
+    }
+  }
+
   /**
    * If the profile says reserved/on_trip but no ride still holds the driver,
    * flip them online immediately (same recovery as the reaper, per driver).
@@ -2149,7 +2771,10 @@ export class RidesService {
     driverId: string,
     status: DriverStatus,
   ): Promise<DriverStatus> {
-    if (status === DriverStatus.ON_TRIP && !(await this.driverHasLiveTrip(driverId))) {
+    if (
+      status === DriverStatus.ON_TRIP &&
+      !(await this.driverHasLiveTrip(driverId))
+    ) {
       await this.redis.del(this.lockKey(driverId));
       await this.driverProfiles.update(
         { userId: driverId, status: DriverStatus.ON_TRIP },
@@ -2158,7 +2783,10 @@ export class RidesService {
       this.logger.warn(`Healed stuck on_trip for driver ${driverId}`);
       return DriverStatus.ONLINE;
     }
-    if (status === DriverStatus.RESERVED && !(await this.driverHasLiveOffer(driverId))) {
+    if (
+      status === DriverStatus.RESERVED &&
+      !(await this.driverHasLiveOffer(driverId))
+    ) {
       await this.redis.del(this.lockKey(driverId));
       await this.driverProfiles.update(
         { userId: driverId, status: DriverStatus.RESERVED },
@@ -2180,15 +2808,19 @@ export class RidesService {
     connectedAccountId?: string,
   ) {
     if (online) {
-      const mayDrive = await this.subscriptionService.mayAccessMarketplace(driverId);
+      const mayDrive =
+        await this.subscriptionService.mayAccessMarketplace(driverId);
       if (!mayDrive) {
         throw new ForbiddenException(
           'Active subscription required to go online',
         );
       }
+      await this.assertKycAllowsOnline(driverId);
     }
 
-    let profile = await this.driverProfiles.findOne({ where: { userId: driverId } });
+    let profile = await this.driverProfiles.findOne({
+      where: { userId: driverId },
+    });
     if (!profile) {
       profile = this.driverProfiles.create({
         userId: driverId,
@@ -2203,13 +2835,18 @@ export class RidesService {
     // Orphaned on_trip/reserved (no live ride) must not wait for the reaper:
     // the driver app looks online / "waiting for requests" while presence
     // still refuses to go offline.
-    profile.status = await this.healOrphanedDriverStatus(driverId, profile.status);
+    profile.status = await this.healOrphanedDriverStatus(
+      driverId,
+      profile.status,
+    );
 
     if (profile.status === DriverStatus.ON_TRIP && !online) {
       throw new ConflictException('Cannot go offline while on a trip');
     }
     if (profile.status === DriverStatus.RESERVED && !online) {
-      throw new ConflictException('Cannot go offline while an offer is pending');
+      throw new ConflictException(
+        'Cannot go offline while an offer is pending',
+      );
     }
     // Reconnect / toggle must never wipe a live offer or active trip back to
     // ONLINE — that made drivers re-offerable while still reserved/on trip.
@@ -2258,14 +2895,25 @@ export class RidesService {
   }
 
   async getDriverPresence(driverId: string) {
-    const profile = await this.driverProfiles.findOne({ where: { userId: driverId } });
-    const subscriptionActive = await this.subscriptionService.isActive(driverId);
+    const profile = await this.driverProfiles.findOne({
+      where: { userId: driverId },
+    });
+    const subscriptionActive =
+      await this.subscriptionService.isActive(driverId);
     const subscriptionRequired = this.subscriptionService.isEnforced();
+    const kycRequired = this.isKycEnforced();
+    const kycApproved = kycRequired
+      ? (await this.kycService.filterApprovedDriverIds([driverId])).has(
+          driverId,
+        )
+      : true;
     return {
       profile: profile ?? null,
       subscriptionActive,
       subscriptionRequired,
-      canGoOnline: !subscriptionRequired || subscriptionActive,
+      kycRequired,
+      kycApproved,
+      canGoOnline: (!subscriptionRequired || subscriptionActive) && kycApproved,
     };
   }
 
@@ -2342,10 +2990,7 @@ export class RidesService {
   private async assertRideParticipant(rideId: string, userId: string) {
     const ride = await this.rides.findOne({ where: { id: rideId } });
     if (!ride) throw new NotFoundException('Ride not found');
-    const isParticipant =
-      ride.riderId === userId ||
-      ride.driverId === userId ||
-      ride.offerDriverId === userId;
+    const isParticipant = ride.riderId === userId || ride.driverId === userId;
     if (!isParticipant) {
       throw new ForbiddenException('You are not a participant on this ride');
     }
@@ -2356,8 +3001,7 @@ export class RidesService {
   @Cron(CronExpression.EVERY_DAY_AT_4AM)
   async purgeExpiredRideMessages() {
     const cutoff = new Date(
-      Date.now() -
-        RidesService.RIDE_CHAT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+      Date.now() - RidesService.RIDE_CHAT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
     );
     const result = await this.rideMessages.delete({
       createdAt: LessThan(cutoff),

@@ -11,6 +11,7 @@ import { SubscriptionService } from './subscription.service';
 import { SubscriptionController } from './subscription.controller';
 import { ConfigurationService } from './configuration.service';
 import { SubscriptionAccessGuard } from '../../common/guards/subscription-access.guard';
+import { PaymentsModule } from '../payments/payments.module';
 
 @Module({
   imports: [
@@ -23,9 +24,14 @@ import { SubscriptionAccessGuard } from '../../common/guards/subscription-access
       Trip,
     ]),
     NotificationsModule,
+    PaymentsModule,
   ],
   controllers: [SubscriptionController],
-  providers: [SubscriptionService, ConfigurationService, SubscriptionAccessGuard],
+  providers: [
+    SubscriptionService,
+    ConfigurationService,
+    SubscriptionAccessGuard,
+  ],
   exports: [SubscriptionService, ConfigurationService, SubscriptionAccessGuard],
 })
 export class SubscriptionModule {}
