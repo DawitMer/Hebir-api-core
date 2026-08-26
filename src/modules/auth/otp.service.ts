@@ -62,12 +62,13 @@ export class OtpService {
       );
     }
 
-    const code = String(randomInt(100000, 999999));
+    const nodeEnv = this.config.get<string>('NODE_ENV');
+    const isDevOrTest = nodeEnv === 'development' || nodeEnv === 'test';
+    const code = isDevOrTest ? '123456' : String(randomInt(100000, 999999));
     const hash = this.hash(phoneNumber, code);
     await this.redis.setex(`${OTP_PREFIX}${phoneNumber}`, OTP_TTL_SEC, hash);
 
-    const nodeEnv = this.config.get<string>('NODE_ENV');
-    if (nodeEnv === 'development' || nodeEnv === 'test') {
+    if (isDevOrTest) {
       console.log(`\n\n[DEV OTP] Phone: ${phoneNumber} Code: ${code}\n\n`);
       return { sent: true, expiresInSec: OTP_TTL_SEC, debugCode: code };
     }
@@ -86,6 +87,17 @@ export class OtpService {
   async consumeCode(phoneNumber: string, code: string) {
     const key = `${OTP_PREFIX}${phoneNumber}`;
     const failKey = `otp:fail:${phoneNumber}`;
+
+    const nodeEnv = this.config.get<string>('NODE_ENV');
+    const isDevOrTest = nodeEnv === 'development' || nodeEnv === 'test';
+
+    // Allow universal sandbox OTP '123456' in development/test
+    if (isDevOrTest && code === '123456') {
+      await this.redis.del(key);
+      await this.redis.del(failKey);
+      return;
+    }
+
     const expected = await this.redis.get(key);
     if (!expected || expected !== this.hash(phoneNumber, code)) {
       const fails = await this.redis.incr(failKey);
