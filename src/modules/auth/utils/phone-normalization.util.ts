@@ -6,7 +6,7 @@
  * need them — rider/driver auth DTOs use `@IsEthiopiaPhone()` instead.
  */
 
-import { normalizeEthiopiaE164 } from '../phone/ethiopia-phone';
+import { normalizeEthiopiaE164 } from '../../../common/phone/ethiopia-phone';
 
 export function normalizePhoneNumber(raw: string): string {
   if (!raw || typeof raw !== 'string') {

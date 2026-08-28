@@ -3,7 +3,8 @@ import {
   Injectable,
   Logger,
   ServiceUnavailableException,
-  TooManyRequestsException,
+  HttpException,
+  HttpStatus,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -158,8 +159,9 @@ export class OtpService {
     const key = `${OTP_COOLDOWN_PREFIX}${phoneNumber}`;
     const ttl = await this.redis.ttl(key);
     if (ttl > 0) {
-      throw new TooManyRequestsException(
+      throw new HttpException(
         `Please wait ${ttl} seconds before requesting another code`,
+        HttpStatus.TOO_MANY_REQUESTS,
       );
     }
   }
@@ -171,8 +173,9 @@ export class OtpService {
       await this.redis.expire(key, PHONE_REQUEST_WINDOW_SEC);
     }
     if (count > PHONE_REQUEST_LIMIT) {
-      throw new TooManyRequestsException(
+      throw new HttpException(
         'Too many OTP requests for this phone number. Try again later.',
+        HttpStatus.TOO_MANY_REQUESTS,
       );
     }
   }
