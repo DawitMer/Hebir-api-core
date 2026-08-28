@@ -1,12 +1,21 @@
 /**
  * Canonical phone normalization utility for Hebir.
  *
- * Enforces E.164 format (+251...) across Ethiopia and supports international formats.
+ * Ethiopian mobiles are normalized via `ethiopia-phone.ts` (E.164 +251…).
+ * International numbers are accepted only for staff/legacy paths that explicitly
+ * need them — rider/driver auth DTOs use `@IsEthiopiaPhone()` instead.
  */
+
+import { normalizeEthiopiaE164 } from '../phone/ethiopia-phone';
 
 export function normalizePhoneNumber(raw: string): string {
   if (!raw || typeof raw !== 'string') {
     throw new Error('Phone number must be a non-empty string');
+  }
+
+  const ethiopian = normalizeEthiopiaE164(raw);
+  if (ethiopian) {
+    return ethiopian;
   }
 
   // Remove all whitespace, dashes, parens, dots
@@ -24,21 +33,6 @@ export function normalizePhoneNumber(raw: string): string {
       throw new Error(`Invalid international phone number: ${raw}`);
     }
     return `+${digitsOnly}`;
-  }
-
-  // Handle 09... or 07... (local Ethiopian 10-digit mobile)
-  if (/^0[79]\d{8}$/.test(cleaned)) {
-    return `+251${cleaned.slice(1)}`;
-  }
-
-  // Handle 9... or 7... (Ethiopian 9-digit without leading 0)
-  if (/^[79]\d{8}$/.test(cleaned)) {
-    return `+251${cleaned}`;
-  }
-
-  // Handle 2519... or 2517... (12-digit Ethiopian without +)
-  if (/^251[79]\d{8}$/.test(cleaned)) {
-    return `+${cleaned}`;
   }
 
   // International standard format without plus (e.g. 12025550123)

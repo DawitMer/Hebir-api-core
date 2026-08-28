@@ -1,7 +1,9 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   ServiceUnavailableException,
+  TooManyRequestsException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -34,8 +36,15 @@ export class VerifyOtpDto {
 
 const OTP_PREFIX = 'otp:phone:';
 const OTP_SESSION_PREFIX = 'otp:session:';
+const OTP_COOLDOWN_PREFIX = 'otp:cooldown:';
+const OTP_REQUEST_PREFIX = 'otp:req:';
 const OTP_TTL_SEC = 300;
 const SESSION_TTL_SEC = 600;
+/** Minimum gap between OTP sends to the same phone. */
+const RESEND_COOLDOWN_SEC = 30;
+/** Max OTP requests per phone per hour (abuse shield). */
+const PHONE_REQUEST_LIMIT = 5;
+const PHONE_REQUEST_WINDOW_SEC = 3600;
 
 /**
  * Phone OTP for signup/login step-up. Codes are stored hashed in Redis.
@@ -44,6 +53,8 @@ const SESSION_TTL_SEC = 600;
  */
 @Injectable()
 export class OtpService {
+  private readonly logger = new Logger(OtpService.name);
+
   constructor(
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     private readonly config: ConfigService,
@@ -58,28 +69,28 @@ export class OtpService {
 
     if (isProd && !smsConfigured) {
       throw new ServiceUnavailableException(
-        'SMS OTP provider is not configured (set SMS_PROVIDER)',
+        'NOT VERIFIED — PRODUCTION SMS PROVIDER REQUIRED (set SMS_PROVIDER)',
       );
     }
+
+    await this.enforceResendCooldown(phoneNumber);
+    await this.enforcePhoneRequestLimit(phoneNumber);
 
     const nodeEnv = this.config.get<string>('NODE_ENV');
     const isDevOrTest = nodeEnv === 'development' || nodeEnv === 'test';
     const code = isDevOrTest ? '123456' : String(randomInt(100000, 999999));
+    const otpKey = `${OTP_PREFIX}${phoneNumber}`;
     const hash = this.hash(phoneNumber, code);
-    await this.redis.setex(`${OTP_PREFIX}${phoneNumber}`, OTP_TTL_SEC, hash);
+    await this.redis.setex(otpKey, OTP_TTL_SEC, hash);
 
     if (isDevOrTest) {
+      this.logger.log(`[DEV OTP] Phone: ${phoneNumber} (code omitted in prod)`);
       console.log(`\n\n[DEV OTP] Phone: ${phoneNumber} Code: ${code}\n\n`);
       return { sent: true, expiresInSec: OTP_TTL_SEC, debugCode: code };
     }
 
-    try {
-      await this.sms.sendOtp(phoneNumber, code);
-    } catch (err) {
-      await this.redis.del(`${OTP_PREFIX}${phoneNumber}`);
-      throw err;
-    }
-
+    // Do not block the HTTP handler on a slow SMS gateway.
+    void this.deliverSmsAsync(phoneNumber, code, otpKey);
     return { sent: true, expiresInSec: OTP_TTL_SEC };
   }
 
@@ -123,7 +134,11 @@ export class OtpService {
       SESSION_TTL_SEC,
       phoneNumber,
     );
-    return { verified: true, otpSessionToken: sessionToken, expiresInSec: SESSION_TTL_SEC };
+    return {
+      verified: true,
+      otpSessionToken: sessionToken,
+      expiresInSec: SESSION_TTL_SEC,
+    };
   }
 
   /** Consumes a one-time OTP session (e.g. before register). */
@@ -137,6 +152,49 @@ export class OtpService {
       throw new UnauthorizedException('OTP session invalid or expired');
     }
     await this.redis.del(key);
+  }
+
+  private async enforceResendCooldown(phoneNumber: string) {
+    const key = `${OTP_COOLDOWN_PREFIX}${phoneNumber}`;
+    const ttl = await this.redis.ttl(key);
+    if (ttl > 0) {
+      throw new TooManyRequestsException(
+        `Please wait ${ttl} seconds before requesting another code`,
+      );
+    }
+  }
+
+  private async enforcePhoneRequestLimit(phoneNumber: string) {
+    const key = `${OTP_REQUEST_PREFIX}${phoneNumber}`;
+    const count = await this.redis.incr(key);
+    if (count === 1) {
+      await this.redis.expire(key, PHONE_REQUEST_WINDOW_SEC);
+    }
+    if (count > PHONE_REQUEST_LIMIT) {
+      throw new TooManyRequestsException(
+        'Too many OTP requests for this phone number. Try again later.',
+      );
+    }
+  }
+
+  private async deliverSmsAsync(
+    phoneNumber: string,
+    code: string,
+    otpKey: string,
+  ) {
+    try {
+      await this.sms.sendOtp(phoneNumber, code);
+      await this.redis.setex(
+        `${OTP_COOLDOWN_PREFIX}${phoneNumber}`,
+        RESEND_COOLDOWN_SEC,
+        '1',
+      );
+    } catch (err) {
+      await this.redis.del(otpKey);
+      this.logger.error(
+        `OTP SMS delivery failed for ${phoneNumber}: ${(err as Error).message}`,
+      );
+    }
   }
 
   private hash(phoneNumber: string, code: string) {

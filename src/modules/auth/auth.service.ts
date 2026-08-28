@@ -28,7 +28,7 @@ import { OtpLoginDto } from './dto/otp-login.dto';
 import { OtpService } from './otp.service';
 import { FirebaseLoginDto } from './dto/firebase-login.dto';
 import { FirebaseService } from './firebase/firebase.service';
-import { normalizePhoneNumber } from './utils/phone-normalization.util';
+import { normalizeEthiopiaE164 } from '../../common/phone/ethiopia-phone';
 
 const SALT_ROUNDS = 10;
 const ACCESS_DENY_PREFIX = 'jwt:deny:';
@@ -103,7 +103,12 @@ export class AuthService {
    */
   async loginWithFirebase(dto: FirebaseLoginDto) {
     const verified = await this.firebase.verifyIdToken(dto.firebaseIdToken);
-    const normalizedPhone = normalizePhoneNumber(verified.phoneNumber);
+    const normalizedPhone = normalizeEthiopiaE164(verified.phoneNumber);
+    if (!normalizedPhone) {
+      throw new UnauthorizedException(
+        'Phone number must be a valid Ethiopian mobile (+2517/9XXXXXXXX)',
+      );
+    }
 
     // Look up by firebaseUid first, or fallback to normalized phone number
     let user = await this.users.findOne({
@@ -161,9 +166,9 @@ export class AuthService {
   async loginWithOtp(dto: OtpLoginDto) {
     await this.otp.consumeCode(dto.phoneNumber, dto.code);
 
-    const normalizedPhone = normalizePhoneNumber(dto.phoneNumber);
+    // DTO @IsEthiopiaPhone() already normalized to E.164.
     let user = await this.users.findOne({
-      where: { phoneNumber: normalizedPhone },
+      where: { phoneNumber: dto.phoneNumber },
     });
 
     if (!user) {
@@ -172,7 +177,7 @@ export class AuthService {
       );
       user = await this.users.save(
         this.users.create({
-          phoneNumber: normalizedPhone,
+          phoneNumber: dto.phoneNumber,
           fullName: dto.fullName,
           passwordHash: null,
           roles: roles.length > 0 ? roles : [UserRole.RIDER],
