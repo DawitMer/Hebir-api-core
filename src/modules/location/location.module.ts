@@ -6,12 +6,14 @@ import { DriverProfile } from '../rides/entities/driver-profile.entity';
 import { Ride } from '../rides/entities/ride.entity';
 import { SubscriptionModule } from '../subscription/subscription.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { RidesModule } from '../rides/rides.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([DriverLocationHistory, DriverProfile, Ride]),
     SubscriptionModule,
     NotificationsModule,
+    RidesModule,
   ],
   controllers: [LocationController],
 })

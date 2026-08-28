@@ -21,6 +21,8 @@ import { KycModule } from '../kyc/kyc.module';
 import { DispatchQueueService } from './dispatch/dispatch.queue.service';
 import { PaymentsModule } from '../payments/payments.module';
 
+import { TripRouteRecorderService } from './trip-route-recorder.service';
+
 @Module({
   imports: [
     ScheduleModule.forRoot(),
@@ -43,7 +45,7 @@ import { PaymentsModule } from '../payments/payments.module';
     PaymentsModule,
   ],
   controllers: [RidesController, DriverPresenceController],
-  providers: [RidesService, DispatchQueueService],
-  exports: [RidesService],
+  providers: [RidesService, DispatchQueueService, TripRouteRecorderService],
+  exports: [RidesService, TripRouteRecorderService],
 })
 export class RidesModule {}

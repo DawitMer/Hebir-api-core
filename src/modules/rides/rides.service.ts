@@ -80,7 +80,7 @@ import {
   PaymentProvider,
 } from '../payments/payment-provider';
 
-export type EnrichedRide = Ride & {
+export type EnrichedRide = Omit<Ride, 'fare'> & {
   fare: FareRecord | null;
   tipAmount: number;
   driver: {
@@ -173,6 +173,8 @@ type StartCodeRecord = {
   attempts: number;
 };
 
+import { TripRouteRecorderService } from './trip-route-recorder.service';
+
 @Injectable()
 export class RidesService {
   private readonly logger = new Logger(RidesService.name);
@@ -207,6 +209,7 @@ export class RidesService {
     private readonly dispatchQueue: DispatchQueueService,
     @Inject(FARE_PAYMENT_PROVIDER)
     private readonly farePayments: PaymentProvider,
+    private readonly routeRecorder: TripRouteRecorderService,
   ) {}
 
   /**
@@ -895,6 +898,12 @@ export class RidesService {
     const patch: Partial<Ride> = { status: nextStatus };
     if (nextStatus === RideStatus.IN_PROGRESS && !ride.startedAt) {
       patch.startedAt = new Date();
+      const startPt = ride.pickup ?? { lat: 8.9806, lng: 38.7578 };
+      void this.routeRecorder.startRecording(rideId, {
+        lat: startPt.lat,
+        lng: startPt.lng,
+        timestampMs: Date.now(),
+      });
     }
     // Guarding on the status we validated makes the transition table
     // authoritative even when two clients patch the same ride at once.
@@ -967,17 +976,28 @@ export class RidesService {
       'destination',
     );
 
-    const distanceKm = ride.distanceM
-      ? ride.distanceM / 1000
-      : this.fareService.quotedTripMetrics(ride.pickup, ride.dropoff)
-          .distanceKm;
-    const quotedMinutes = ride.durationS
-      ? ride.durationS / 60
-      : this.fareService.estimateDurationMinutes(distanceKm);
-    const durationMinutes = this.fareService.settledDurationMinutes(
-      quotedMinutes,
-      ride.startedAt,
+    const recordedDistM =
+      await this.routeRecorder.getAccumulatedDistance(rideId);
+    const actualRoute =
+      await this.routeRecorder.getSimplifiedRoute(rideId);
+    const actualDistanceM =
+      recordedDistM > 50
+        ? recordedDistM
+        : ride.distanceM
+          ? ride.distanceM
+          : Math.round(
+              this.fareService.quotedTripMetrics(ride.pickup, ride.dropoff)
+                .distanceKm * 1000,
+            );
+    const distanceKm = actualDistanceM / 1000;
+    const startedAtTime = ride.startedAt
+      ? ride.startedAt.getTime()
+      : Date.now() - (ride.durationS ?? 300) * 1000;
+    const actualDurationS = Math.max(
+      30,
+      Math.round((Date.now() - startedAtTime) / 1000),
     );
+    const durationMinutes = actualDurationS / 60;
 
     const fareBreakdown = await this.fareService.calculate({
       distanceKm,
@@ -1001,6 +1021,12 @@ export class RidesService {
         {
           status: RideStatus.COMPLETED,
           completedAt: new Date(),
+          actualDistanceM,
+          actualDurationS,
+          actualRoute: actualRoute.length > 0 ? actualRoute : null,
+          fare: String(fareBreakdown.total),
+          fareBreakdown: fareBreakdown as unknown as Record<string, unknown>,
+          pricingVersion: 'v1',
           offerDriverId: null,
           offerExpiresAt: null,
         },
@@ -1077,18 +1103,30 @@ export class RidesService {
       return fareRecord.total;
     });
 
-    await this.notify(ride.riderId, 'ride.completed', {
+    const completionPayload = {
       rideId,
+      status: RideStatus.COMPLETED,
       fare: fareTotal,
-    });
-    await this.notify(driverId, 'ride.completed', {
-      rideId,
-      fare: fareTotal,
-    });
+      fareBreakdown: {
+        initialFee: fareBreakdown.initialFee,
+        distanceCharge: fareBreakdown.distanceCharge,
+        timeCharge: fareBreakdown.timeCharge,
+        surgeMultiplier: fareBreakdown.surgeMultiplier,
+        total: fareBreakdown.total,
+        actualDistanceKm: distanceKm,
+        actualDurationMinutes: Math.round(durationMinutes),
+      },
+      actualDistanceM,
+      actualDurationS,
+    };
+
+    await this.notify(ride.riderId, 'ride.completed', completionPayload);
+    await this.notify(driverId, 'ride.completed', completionPayload);
+    await this.routeRecorder.clearRoute(rideId);
     await clearLiveTrack(this.redis, driverId);
 
     this.logger.log(
-      `Ride ${rideId}: completed by driver ${driverId}, fare=${fareTotal}`,
+      `Ride ${rideId}: completed by driver ${driverId}, fare=${fareTotal}, distance=${actualDistanceM}m, duration=${actualDurationS}s`,
     );
     return (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
   }
@@ -1763,6 +1801,14 @@ export class RidesService {
     await this.notify(ride.riderId, 'ride.status_changed', {
       rideId,
       status: RideStatus.IN_PROGRESS,
+      startedAt: new Date().toISOString(),
+    });
+
+    const startPt = ride.pickup ?? { lat: 8.9806, lng: 38.7578 };
+    void this.routeRecorder.startRecording(rideId, {
+      lat: startPt.lat,
+      lng: startPt.lng,
+      timestampMs: Date.now(),
     });
 
     const updated =

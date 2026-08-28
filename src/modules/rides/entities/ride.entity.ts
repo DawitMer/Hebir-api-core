@@ -103,6 +103,24 @@ export class Ride {
   @Column({ type: 'timestamptz', nullable: true })
   startCodeExpiresAt: Date | null;
 
+  @Column({ type: 'int', nullable: true })
+  actualDistanceM: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  actualDurationS: number | null;
+
+  @Column({ type: 'jsonb', nullable: true })
+  actualRoute: GeoPoint[] | null;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  fare: string | null;
+
+  @Column({ type: 'jsonb', nullable: true })
+  fareBreakdown: Record<string, unknown> | null;
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  pricingVersion: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

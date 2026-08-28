@@ -43,8 +43,8 @@ import {
   LIVE_TRACK_TTL_SEC,
 } from '../rides/ride-live-track';
 import { remainingEta } from '../rides/remaining-eta';
-
 import { GeocodingService } from '../../common/geocoding/geocoding.service';
+import { TripRouteRecorderService } from '../rides/trip-route-recorder.service';
 
 const TRACKABLE_RIDE_STATUSES = [
   RideStatus.MATCHED,
@@ -91,6 +91,7 @@ export class LocationController {
     private readonly driverProfiles: Repository<DriverProfile>,
     @InjectRepository(Ride) private readonly rides: Repository<Ride>,
     private readonly notifications: NotificationsGateway,
+    private readonly routeRecorder: TripRouteRecorderService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {
     this.historyFlushSeconds = Number(
@@ -253,6 +254,26 @@ export class LocationController {
               quotedDurationS: track.durationS,
             })
           : null;
+      let totalTraveledM: number | null = null;
+      if (track.status === RideStatus.IN_PROGRESS) {
+        try {
+          const recResult = await this.routeRecorder.recordGpsPoint(
+            track.rideId,
+            {
+              lat,
+              lng,
+              timestampMs,
+              heading: ping?.heading ?? body.heading ?? null,
+              speed: ping?.speed ?? body.speed ?? null,
+              accuracy: ping?.accuracy ?? body.accuracy ?? null,
+            },
+          );
+          totalTraveledM = recResult.totalDistanceM;
+        } catch (recErr) {
+          this.logger.warn(`Route recording failed for ride ${track.rideId}: ${recErr}`);
+        }
+      }
+
       await this.notifications.notify(track.riderId, 'ride.driver_location', {
         rideId: track.rideId,
         driverId,
@@ -263,6 +284,7 @@ export class LocationController {
         accuracy: ping?.accuracy ?? body.accuracy ?? null,
         timestampMs,
         seq: timestampMs,
+        actualDistanceM: totalTraveledM,
         remainingMetres: eta?.remainingMetres ?? null,
         etaSeconds: eta?.etaSeconds ?? null,
         etaTarget: eta?.target ?? null,
