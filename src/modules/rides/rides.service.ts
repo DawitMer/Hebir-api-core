@@ -2070,10 +2070,14 @@ export class RidesService {
       const fareRec = fareByRide.get(ride.id);
       const estFare = calculatedFares[idx];
 
-      const distanceKm = ride.distanceM
+      const distanceKm = ride.actualDistanceM != null
+        ? ride.actualDistanceM / 1000
+        : ride.distanceM
         ? ride.distanceM / 1000
         : Math.round(estFare.distanceMeters) / 1000;
-      const durationMinutes = ride.durationS
+      const durationMinutes = ride.actualDurationS != null
+        ? Math.round(ride.actualDurationS / 60)
+        : ride.durationS
         ? Math.round(ride.durationS / 60)
         : Math.round(estFare.durationMinutes);
 
