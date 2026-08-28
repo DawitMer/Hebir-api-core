@@ -974,30 +974,26 @@ export class RidesService {
     const actualRoute =
       await this.routeRecorder.getSimplifiedRoute(rideId);
 
-    // Determine actual traveled road distance
+    // Determine actual traveled road distance (dynamic early dropoff recalculation)
     let actualDistanceM = recordedDistM;
-    if (actualDistanceM <= 50) {
+    if (actualDistanceM <= 0) {
       const lastLoc = await this.readLiveDriverPoint(driverId);
       if (lastLoc && ride.pickup) {
         const straightKm = haversineKm(ride.pickup, lastLoc);
-        actualDistanceM = Math.round(straightKm * 1.35 * 1000);
+        actualDistanceM = Math.max(0, Math.round(straightKm * 1.35 * 1000));
       }
     }
-    if (actualDistanceM <= 50) {
-      actualDistanceM =
-        ride.distanceM ??
-        Math.round(
-          this.fareService.quotedTripMetrics(ride.pickup, ride.dropoff)
-            .distanceKm * 1000,
-        );
+    // Cap at the quoted distance so GPS jitter cannot exceed the original trip
+    if (ride.distanceM && actualDistanceM > ride.distanceM * 1.5) {
+      actualDistanceM = ride.distanceM;
     }
 
-    const distanceKm = actualDistanceM / 1000;
+    const distanceKm = Math.max(0, actualDistanceM) / 1000;
     const startedAtTime = ride.startedAt
       ? ride.startedAt.getTime()
-      : Date.now() - (ride.durationS ?? 300) * 1000;
+      : Date.now() - 30 * 1000;
     const actualDurationS = Math.max(
-      30,
+      10,
       Math.round((Date.now() - startedAtTime) / 1000),
     );
     const durationMinutes = actualDurationS / 60;
