@@ -968,27 +968,30 @@ export class RidesService {
       );
     }
 
-    await this.assertDriverWithin(
-      driverId,
-      ride.dropoff,
-      COMPLETE_RADIUS_M,
-      'complete the trip',
-      'destination',
-    );
-
+    // Allow completing the trip anywhere (e.g. early drop-off at rider request).
     const recordedDistM =
       await this.routeRecorder.getAccumulatedDistance(rideId);
     const actualRoute =
       await this.routeRecorder.getSimplifiedRoute(rideId);
-    const actualDistanceM =
-      recordedDistM > 50
-        ? recordedDistM
-        : ride.distanceM
-          ? ride.distanceM
-          : Math.round(
-              this.fareService.quotedTripMetrics(ride.pickup, ride.dropoff)
-                .distanceKm * 1000,
-            );
+
+    // Determine actual traveled road distance
+    let actualDistanceM = recordedDistM;
+    if (actualDistanceM <= 50) {
+      const lastLoc = await this.readLiveDriverPoint(driverId);
+      if (lastLoc && ride.pickup) {
+        const straightKm = haversineKm(ride.pickup, lastLoc);
+        actualDistanceM = Math.round(straightKm * 1.35 * 1000);
+      }
+    }
+    if (actualDistanceM <= 50) {
+      actualDistanceM =
+        ride.distanceM ??
+        Math.round(
+          this.fareService.quotedTripMetrics(ride.pickup, ride.dropoff)
+            .distanceKm * 1000,
+        );
+    }
+
     const distanceKm = actualDistanceM / 1000;
     const startedAtTime = ride.startedAt
       ? ride.startedAt.getTime()

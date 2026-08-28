@@ -12,7 +12,11 @@ export const ETHIOPIA_E164 = /^\+251[79]\d{8}$/;
  */
 export function normalizeEthiopiaE164(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
-  let digits = raw.replace(/\D/g, '');
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('+') && !trimmed.startsWith('+251')) {
+    return null;
+  }
+  let digits = trimmed.replace(/\D/g, '');
   if (!digits) return null;
   if (digits.startsWith('251') && digits.length >= 12) {
     digits = digits.slice(3);
@@ -20,8 +24,8 @@ export function normalizeEthiopiaE164(raw: unknown): string | null {
   if (digits.startsWith('0') && digits.length >= 10) {
     digits = digits.slice(1);
   }
-  if (digits.length > 9) {
-    digits = digits.slice(-9);
+  if (digits.length === 12 && digits.startsWith('251')) {
+    digits = digits.slice(3);
   }
   if (!/^[79]\d{8}$/.test(digits)) return null;
   return `+251${digits}`;

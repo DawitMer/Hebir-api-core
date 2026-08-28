@@ -134,6 +134,11 @@ describe('RidesService & Dispatch Concurrency Suite', () => {
       redis as never,
       dispatchQueue as never,
       { settleFare: jest.fn() } as never,
+      {
+        getAccumulatedDistance: jest.fn().mockResolvedValue(0),
+        getSimplifiedRoute: jest.fn().mockResolvedValue([]),
+        startTripRecording: jest.fn(),
+      } as never,
     );
 
     return { service, rides, driverProfiles, dispatchQueue };
