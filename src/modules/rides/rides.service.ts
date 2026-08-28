@@ -2011,7 +2011,54 @@ export class RidesService {
       profiles.map((profile) => [profile.userId, profile]),
     );
 
-    return rides.map((ride) => {
+    const calculatedFares = await Promise.all(
+      rides.map(async (ride) => {
+        try {
+          const distanceKm = ride.distanceM
+            ? ride.distanceM / 1000
+            : (this.fareService?.quotedTripMetrics?.(ride.pickup, ride.dropoff)?.distanceKm ?? 5);
+          const durationMinutes = ride.durationS
+            ? ride.durationS / 60
+            : (this.fareService?.estimateDurationMinutes?.(distanceKm) ?? 15);
+          if (!this.fareService?.calculate) {
+            return {
+              total: 100,
+              initialFee: 50,
+              distanceCharge: 30,
+              timeCharge: 20,
+              waitCharge: 0,
+              surgeMultiplier: 1,
+              vehicleMultiplier: 1,
+              platformFee: 0,
+              distanceMeters: distanceKm * 1000,
+              durationMinutes,
+            };
+          }
+          return await this.fareService.calculate({
+            distanceKm,
+            durationMinutes,
+            zoneId: zoneIdFor(ride.pickup),
+            surgeMultiplier: ride.quotedSurgeMultiplier ?? undefined,
+            vehicleType: ride.vehicleType,
+          });
+        } catch {
+          return {
+            total: 100,
+            initialFee: 50,
+            distanceCharge: 30,
+            timeCharge: 20,
+            waitCharge: 0,
+            surgeMultiplier: 1,
+            vehicleMultiplier: 1,
+            platformFee: 0,
+            distanceMeters: (ride.distanceM ?? 5000),
+            durationMinutes: 15,
+          };
+        }
+      }),
+    );
+
+    return rides.map((ride, idx) => {
       const tip = tipByRide.get(ride.id);
       const driver = ride.driverId ? driverById.get(ride.driverId) : undefined;
       const vehicle = ride.driverId
@@ -2020,9 +2067,40 @@ export class RidesService {
       const profile = ride.driverId
         ? profileByDriver.get(ride.driverId)
         : undefined;
+      const fareRec = fareByRide.get(ride.id);
+      const estFare = calculatedFares[idx];
+
+      const distanceKm = ride.distanceM
+        ? ride.distanceM / 1000
+        : Math.round(estFare.distanceMeters) / 1000;
+      const durationMinutes = ride.durationS
+        ? Math.round(ride.durationS / 60)
+        : Math.round(estFare.durationMinutes);
 
       return {
         ...ride,
+        distanceKm,
+        durationMinutes,
+        estimatedFare: fareRec
+          ? {
+              total: Number(fareRec.total),
+              initialFee: Number(fareRec.baseFare),
+              distanceCharge: Number(fareRec.distanceFare),
+              timeCharge: Number(fareRec.timeFare),
+              waitCharge: 0,
+              surgeMultiplier: Number(fareRec.surgeMultiplier),
+              platformFee: Number(fareRec.platformFee),
+            }
+          : {
+              total: estFare.total,
+              initialFee: estFare.initialFee,
+              distanceCharge: estFare.distanceCharge,
+              timeCharge: estFare.timeCharge,
+              waitCharge: estFare.waitCharge,
+              surgeMultiplier: estFare.surgeMultiplier,
+              vehicleMultiplier: estFare.vehicleMultiplier,
+              platformFee: estFare.platformFee,
+            },
         // Internal dispatch bookkeeping — a rider must never learn which
         // driver an open offer went to before that driver accepts.
         offerDriverId: null,
@@ -2030,7 +2108,7 @@ export class RidesService {
         startCodeHash: null,
         startCodeAttempts: 0,
         startCodeExpiresAt: null,
-        fare: fareByRide.get(ride.id) ?? null,
+        fare: fareRec ?? null,
         tipAmount: tip ? Number(tip.amount) : 0,
         driver: driver
           ? {
