@@ -74,17 +74,22 @@ export class RatingsService {
   }
 
   private async recomputeDriverRating(driverId: string): Promise<void> {
-    const result = await this.ratings
-      .createQueryBuilder('r')
-      .select('AVG(r.stars)', 'avg')
-      .where('r.ratedUser = :driverId', { driverId })
-      .getRawOne<{ avg: string | null }>();
+    const lastRatings = await this.ratings.find({
+      where: { ratedUser: driverId },
+      order: { createdAt: 'DESC' },
+      take: 100,
+    });
+
+    if (lastRatings.length === 0) return;
+
+    const sum = lastRatings.reduce((acc, r) => acc + r.stars, 0);
+    const avg = sum / lastRatings.length;
 
     const profile = await this.driverProfiles.findOne({
       where: { userId: driverId },
     });
-    if (profile && result?.avg != null) {
-      profile.ratingAvg = String(Math.round(Number(result.avg) * 100) / 100);
+    if (profile) {
+      profile.ratingAvg = String(Math.round(avg * 100) / 100);
       await this.driverProfiles.save(profile);
     }
   }
