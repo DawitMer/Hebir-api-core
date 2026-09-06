@@ -16,6 +16,24 @@ describe('FareService', () => {
     );
   });
 
+  it('keeps a ride rate snapshot stable when live configuration changes', async () => {
+    const snapshot = service.getRates();
+    const input = { distanceKm: 5, durationMinutes: 18, surgeMultiplier: 1 };
+    const original = await service.calculate(input, snapshot);
+    const before = rates[FareRateKeys.perMeterEtb];
+    try {
+      rates[FareRateKeys.perMeterEtb] = before * 2;
+      expect((await service.calculate(input, snapshot)).total).toBe(
+        original.total,
+      );
+      expect((await service.calculate(input)).total).toBeGreaterThan(
+        original.total,
+      );
+    } finally {
+      rates[FareRateKeys.perMeterEtb] = before;
+    }
+  });
+
   it('prices a typical 5 km / 18 min Addis sedan trip in the Ride/Feres range', async () => {
     const fare = await service.calculate({
       distanceKm: 5,

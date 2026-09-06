@@ -12,7 +12,6 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Cron, CronExpression } from '@nestjs/schedule';
 import {
   In,
   LessThan,
@@ -26,6 +25,7 @@ import { createHash, randomInt } from 'crypto';
 import Redis from 'ioredis';
 import { REDIS_CLIENT } from '../../redis/redis.module';
 import { Ride, RideStatus } from './entities/ride.entity';
+import { RideRouteCheckpoint } from './entities/ride-route-checkpoint.entity';
 import { RideStatusEvent } from './entities/ride-status-event.entity';
 import { RideMessage } from './entities/ride-message.entity';
 import { FareRecord } from './entities/fare-record.entity';
@@ -40,6 +40,7 @@ import { PaymentRecord, PaymentType } from './entities/payment-record.entity';
 import { Tip } from '../tips/entities/tip.entity';
 import { UserAccount, UserRole } from '../auth/entities/user-account.entity';
 import { RequestRideDto } from './dto/request-ride.dto';
+import { ListRideMessagesDto } from './dto/list-ride-messages.dto';
 import { DriverInitiatedRideDto } from './dto/driver-initiated-ride.dto';
 import { FareService } from '../fare/fare.service';
 import { SubscriptionService } from '../subscription/subscription.service';
@@ -66,7 +67,6 @@ import {
 } from './ride-live-track';
 import {
   ARRIVE_RADIUS_M,
-  COMPLETE_RADIUS_M,
   START_RADIUS_M,
   metresBetween,
 } from './ride-geofence';
@@ -265,6 +265,7 @@ export class RidesService {
           distanceM: Math.round(distanceKm * 1000),
           durationS: Math.round(durationMinutes * 60),
           quotedSurgeMultiplier: quotedFare.surgeMultiplier,
+          quotedFareRates: quotedFare.rates,
           status: RideStatus.SEARCHING,
           requestedAt: new Date(),
         }),
@@ -690,6 +691,7 @@ export class RidesService {
       await this.abortAcceptAfterCancel(rideId, driverId);
       throw new ConflictException('Ride was cancelled during accept');
     }
+    await this.invalidateDriverStatusCache(driverId);
     await this.dispatchQueue.clearState(rideId);
 
     // Refresh both addresses at acceptance so the confirmed ride carries a
@@ -898,12 +900,6 @@ export class RidesService {
     const patch: Partial<Ride> = { status: nextStatus };
     if (nextStatus === RideStatus.IN_PROGRESS && !ride.startedAt) {
       patch.startedAt = new Date();
-      const startPt = ride.pickup ?? { lat: 8.9806, lng: 38.7578 };
-      void this.routeRecorder.startRecording(rideId, {
-        lat: startPt.lat,
-        lng: startPt.lng,
-        timestampMs: Date.now(),
-      });
     }
     // Guarding on the status we validated makes the transition table
     // authoritative even when two clients patch the same ride at once.
@@ -919,6 +915,12 @@ export class RidesService {
       throw new ConflictException(
         `Ride changed state concurrently; retry from ${nextStatus === RideStatus.IN_PROGRESS ? 'arriving' : previousStatus}`,
       );
+    }
+    if (patch.startedAt) {
+      await this.routeRecorder.startRecording(rideId, {
+        ...ride.pickup,
+        timestampMs: patch.startedAt.getTime(),
+      });
     }
     await this.logEvent(rideId, nextStatus, `Transitioned by ${actorId}`);
 
@@ -968,58 +970,98 @@ export class RidesService {
       );
     }
 
-    // Allow completing the trip anywhere (e.g. early drop-off at rider request).
-    const recordedDistM =
-      await this.routeRecorder.getAccumulatedDistance(rideId);
-    const actualRoute =
-      await this.routeRecorder.getSimplifiedRoute(rideId);
-
-    // Determine actual traveled road distance (dynamic early dropoff recalculation)
-    let actualDistanceM = recordedDistM;
-    if (actualDistanceM <= 0) {
-      const lastLoc = await this.readLiveDriverPoint(driverId);
-      if (lastLoc && ride.pickup) {
-        const straightKm = haversineKm(ride.pickup, lastLoc);
-        actualDistanceM = Math.max(0, Math.round(straightKm * 1.35 * 1000));
-      }
-    }
-    // Cap at the quoted distance so GPS jitter cannot exceed the original trip
-    if (ride.distanceM && actualDistanceM > ride.distanceM * 1.5) {
-      actualDistanceM = ride.distanceM;
-    }
-
-    const distanceKm = Math.max(0, actualDistanceM) / 1000;
-    const startedAtTime = ride.startedAt
-      ? ride.startedAt.getTime()
-      : Date.now() - 30 * 1000;
-    const actualDurationS = Math.max(
-      10,
-      Math.round((Date.now() - startedAtTime) / 1000),
-    );
-    const durationMinutes = actualDurationS / 60;
-
-    const fareBreakdown = await this.fareService.calculate({
-      distanceKm,
-      durationMinutes,
-      zoneId: zoneIdFor(ride.pickup),
-      // Prefer the surge locked when the rider requested — same money for both sides.
-      surgeMultiplier: ride.quotedSurgeMultiplier ?? undefined,
-      // Same class multiplier as the quote — the rider pays what they saw.
-      vehicleType: ride.vehicleType,
-    });
-
     // Status flip + fare + payment + earning + driver release are atomic:
     // a mid-flight failure rolls the ride back to in_progress so the driver
-    // can simply retry completion. The conditional UPDATE inside the
-    // transaction guarantees only one caller wins and side effects are
-    // written exactly once per ride.
-    const fareTotal = await this.rides.manager.transaction(async (em) => {
+    // can simply retry completion. Locking ride -> route checkpoint matches
+    // GPS ingestion's lock order, freezing one route snapshot before pricing.
+    const settlement = await this.rides.manager.transaction(async (em) => {
+      const lockedRide = await em.findOne(Ride, {
+        where: { id: rideId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!lockedRide) throw new NotFoundException('Ride not found');
+      if (lockedRide.driverId !== driverId) {
+        throw new ForbiddenException('You are not the driver on this ride');
+      }
+      if (lockedRide.status === RideStatus.COMPLETED) {
+        const existingFare = await em.findOne(FareRecord, {
+          where: { rideId },
+        });
+        return {
+          fareTotal: existingFare?.total ?? lockedRide.fare ?? '0',
+          actualDistanceM: lockedRide.actualDistanceM ?? 0,
+          actualDurationS: lockedRide.actualDurationS ?? 0,
+        };
+      }
+      if (lockedRide.status !== RideStatus.IN_PROGRESS) {
+        throw new ConflictException(
+          `Ride must be in_progress to complete (current status: ${lockedRide.status})`,
+        );
+      }
+
+      const checkpoint = await em.findOne(RideRouteCheckpoint, {
+        where: { rideId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      const recordedDistM = checkpoint?.totalDistanceM ?? 0;
+      const routePoints = checkpoint ? [...checkpoint.points] : [];
+      if (
+        checkpoint &&
+        routePoints[routePoints.length - 1]?.timestampMs !==
+          checkpoint.lastFix.timestampMs
+      ) {
+        routePoints.push(checkpoint.lastFix);
+      }
+      const actualRoute = routePoints.map(({ lat, lng }) => ({ lat, lng }));
+
+      // Preserve the existing fare policy while taking its inputs from one
+      // transactionally frozen checkpoint.
+      let actualDistanceM = recordedDistM;
+      if (actualDistanceM <= 0) {
+        const lastLoc = await this.readLiveDriverPoint(driverId);
+        if (lastLoc && lockedRide.pickup) {
+          const straightKm = haversineKm(lockedRide.pickup, lastLoc);
+          actualDistanceM = Math.max(
+            0,
+            Math.round(straightKm * 1.35 * 1000),
+          );
+        }
+      }
+      if (
+        lockedRide.distanceM &&
+        actualDistanceM > lockedRide.distanceM * 1.5
+      ) {
+        actualDistanceM = lockedRide.distanceM;
+      }
+
+      const completedAt = new Date();
+      const distanceKm = Math.max(0, actualDistanceM) / 1000;
+      const startedAtTime = lockedRide.startedAt
+        ? lockedRide.startedAt.getTime()
+        : completedAt.getTime() - 30 * 1000;
+      const actualDurationS = Math.max(
+        10,
+        Math.round((completedAt.getTime() - startedAtTime) / 1000),
+      );
+      const durationMinutes = actualDurationS / 60;
+
+      const fareBreakdown = await this.fareService.calculate(
+        {
+          distanceKm,
+          durationMinutes,
+          zoneId: zoneIdFor(lockedRide.pickup),
+          surgeMultiplier: lockedRide.quotedSurgeMultiplier ?? undefined,
+          vehicleType: lockedRide.vehicleType,
+        },
+        lockedRide.quotedFareRates,
+      );
+
       const completed = await em.update(
         Ride,
         { id: rideId, status: RideStatus.IN_PROGRESS, driverId },
         {
           status: RideStatus.COMPLETED,
-          completedAt: new Date(),
+          completedAt,
           actualDistanceM,
           actualDurationS,
           actualRoute: actualRoute.length > 0 ? actualRoute : null,
@@ -1037,7 +1079,11 @@ export class RidesService {
           const existingFare = await em.findOne(FareRecord, {
             where: { rideId },
           });
-          return existingFare?.total ?? '0';
+          return {
+            fareTotal: existingFare?.total ?? latest.fare ?? '0',
+            actualDistanceM: latest.actualDistanceM ?? 0,
+            actualDurationS: latest.actualDurationS ?? 0,
+          };
         }
         throw new ConflictException('Ride is no longer in progress');
       }
@@ -1063,13 +1109,13 @@ export class RidesService {
 
       const settled = await this.farePayments.settleFare({
         rideId,
-        riderId: ride.riderId,
+        riderId: lockedRide.riderId,
         amountEtb: fareRecord.total,
         idempotencyKey: `fare:${rideId}`,
       });
       await em.save(
         em.create(PaymentRecord, {
-          userId: ride.riderId,
+          userId: lockedRide.riderId,
           rideId,
           type: PaymentType.FARE,
           amount: fareRecord.total,
@@ -1099,30 +1145,36 @@ export class RidesService {
       );
       await em.increment(DriverProfile, { userId: driverId }, 'totalTrips', 1);
 
-      return fareRecord.total;
+      return { fareTotal: fareRecord.total, actualDistanceM, actualDurationS };
     });
+    const { fareTotal, actualDistanceM, actualDurationS } = settlement;
 
+    const settledRide =
+      (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
     const completionPayload = {
       rideId,
       status: RideStatus.COMPLETED,
       fare: fareTotal,
       fareBreakdown: {
-        initialFee: fareBreakdown.initialFee,
-        distanceCharge: fareBreakdown.distanceCharge,
-        timeCharge: fareBreakdown.timeCharge,
-        surgeMultiplier: fareBreakdown.surgeMultiplier,
-        total: fareBreakdown.total,
-        actualDistanceKm: distanceKm,
-        actualDurationMinutes: Math.round(durationMinutes),
+        ...settledRide.fareBreakdown,
+        actualDistanceKm: (settledRide.actualDistanceM ?? 0) / 1000,
+        actualDurationMinutes: Math.round(
+          (settledRide.actualDurationS ?? 0) / 60,
+        ),
       },
-      actualDistanceM,
-      actualDurationS,
+      actualDistanceM: settledRide.actualDistanceM,
+      actualDurationS: settledRide.actualDurationS,
     };
 
     await this.notify(ride.riderId, 'ride.completed', completionPayload);
     await this.notify(driverId, 'ride.completed', completionPayload);
     await this.routeRecorder.clearRoute(rideId);
-    await clearLiveTrack(this.redis, driverId);
+    await this.invalidateDriverStatusCache(driverId);
+    await clearLiveTrack(this.redis, driverId, rideId).catch((error: Error) => {
+      this.logger.warn(
+        `Ride ${rideId} settled; live-track cleanup failed: ${error.message}`,
+      );
+    });
 
     this.logger.log(
       `Ride ${rideId}: completed by driver ${driverId}, fare=${fareTotal}, distance=${actualDistanceM}m, duration=${actualDurationS}s`,
@@ -1342,13 +1394,16 @@ export class RidesService {
     const durationMinutes = ride.durationS
       ? ride.durationS / 60
       : this.fareService.estimateDurationMinutes(distanceKm);
-    const fare = await this.fareService.calculate({
-      distanceKm,
-      durationMinutes,
-      zoneId: zoneIdFor(ride.pickup),
-      surgeMultiplier: ride.quotedSurgeMultiplier ?? undefined,
-      vehicleType: ride.vehicleType,
-    });
+    const fare = await this.fareService.calculate(
+      {
+        distanceKm,
+        durationMinutes,
+        zoneId: zoneIdFor(ride.pickup),
+        surgeMultiplier: ride.quotedSurgeMultiplier ?? undefined,
+        vehicleType: ride.vehicleType,
+      },
+      ride.quotedFareRates,
+    );
     return {
       rideId: ride.id,
       id: ride.id,
@@ -1668,6 +1723,7 @@ export class RidesService {
             distanceM: Math.round(distanceKm * 1000),
             durationS: Math.round(durationMinutes * 60),
             quotedSurgeMultiplier: quotedFare.surgeMultiplier,
+            quotedFareRates: quotedFare.rates,
             status: RideStatus.ACCEPTED,
             requestedAt: now,
             matchedAt: now,
@@ -1804,7 +1860,7 @@ export class RidesService {
     });
 
     const startPt = ride.pickup ?? { lat: 8.9806, lng: 38.7578 };
-    void this.routeRecorder.startRecording(rideId, {
+    await this.routeRecorder.startRecording(rideId, {
       lat: startPt.lat,
       lng: startPt.lng,
       timestampMs: Date.now(),
@@ -1975,6 +2031,15 @@ export class RidesService {
    * Batched enrichment — one query per related table for the whole page
    * instead of five per ride.
    */
+  async invalidateDriverStatusCache(
+    driverId: string | null | undefined,
+  ): Promise<void> {
+    if (!driverId) return;
+    try {
+      await this.redis.del(`driver:status:${driverId}`);
+    } catch {}
+  }
+
   private async enrichRides(rides: Ride[]): Promise<EnrichedRide[]> {
     if (rides.length === 0) return [];
 
@@ -2013,47 +2078,52 @@ export class RidesService {
 
     const calculatedFares = await Promise.all(
       rides.map(async (ride) => {
+        const persisted = fareByRide.get(ride.id);
+        if (persisted) {
+          const baseFare = Number(persisted.baseFare ?? 0);
+          const distanceFare = Number(persisted.distanceFare ?? 0);
+          const timeFare = Number(persisted.timeFare ?? 0);
+          const total = Number(
+            persisted.total ?? baseFare + distanceFare + timeFare,
+          );
+          return {
+            total,
+            initialFee: baseFare,
+            distanceCharge: distanceFare,
+            timeCharge: timeFare,
+            waitCharge: 0,
+            surgeMultiplier: Number(persisted.surgeMultiplier ?? 1),
+            vehicleMultiplier: 1,
+            platformFee: 0,
+            distanceMeters: ride.distanceM ?? 0,
+            durationMinutes: ride.durationS ? ride.durationS / 60 : 0,
+          };
+        }
         try {
           const distanceKm = ride.distanceM
             ? ride.distanceM / 1000
-            : (this.fareService?.quotedTripMetrics?.(ride.pickup, ride.dropoff)?.distanceKm ?? 5);
+            : this.fareService.quotedTripMetrics(ride.pickup, ride.dropoff)
+                .distanceKm;
           const durationMinutes = ride.durationS
             ? ride.durationS / 60
-            : (this.fareService?.estimateDurationMinutes?.(distanceKm) ?? 15);
-          if (!this.fareService?.calculate) {
-            return {
-              total: 100,
-              initialFee: 50,
-              distanceCharge: 30,
-              timeCharge: 20,
-              waitCharge: 0,
-              surgeMultiplier: 1,
-              vehicleMultiplier: 1,
-              platformFee: 0,
-              distanceMeters: distanceKm * 1000,
+            : this.fareService.estimateDurationMinutes(distanceKm);
+          return await this.fareService.calculate(
+            {
+              distanceKm,
               durationMinutes,
-            };
-          }
-          return await this.fareService.calculate({
-            distanceKm,
-            durationMinutes,
-            zoneId: zoneIdFor(ride.pickup),
-            surgeMultiplier: ride.quotedSurgeMultiplier ?? undefined,
-            vehicleType: ride.vehicleType,
-          });
-        } catch {
-          return {
-            total: 100,
-            initialFee: 50,
-            distanceCharge: 30,
-            timeCharge: 20,
-            waitCharge: 0,
-            surgeMultiplier: 1,
-            vehicleMultiplier: 1,
-            platformFee: 0,
-            distanceMeters: (ride.distanceM ?? 5000),
-            durationMinutes: 15,
-          };
+              zoneId: zoneIdFor(ride.pickup),
+              surgeMultiplier: ride.quotedSurgeMultiplier ?? undefined,
+              vehicleType: ride.vehicleType,
+            },
+            ride.quotedFareRates,
+          );
+        } catch (error) {
+          this.logger.error(
+            `Fare unavailable for ride ${ride.id}: ${(error as Error).message}`,
+          );
+          throw new ServiceUnavailableException(
+            'Fare calculation unavailable — please retry',
+          );
         }
       }),
     );
@@ -2070,16 +2140,18 @@ export class RidesService {
       const fareRec = fareByRide.get(ride.id);
       const estFare = calculatedFares[idx];
 
-      const distanceKm = ride.actualDistanceM != null
-        ? ride.actualDistanceM / 1000
-        : ride.distanceM
-        ? ride.distanceM / 1000
-        : Math.round(estFare.distanceMeters) / 1000;
-      const durationMinutes = ride.actualDurationS != null
-        ? Math.round(ride.actualDurationS / 60)
-        : ride.durationS
-        ? Math.round(ride.durationS / 60)
-        : Math.round(estFare.durationMinutes);
+      const distanceKm =
+        ride.actualDistanceM != null
+          ? ride.actualDistanceM / 1000
+          : ride.distanceM
+            ? ride.distanceM / 1000
+            : Math.round(estFare.distanceMeters) / 1000;
+      const durationMinutes =
+        ride.actualDurationS != null
+          ? Math.round(ride.actualDurationS / 60)
+          : ride.durationS
+            ? Math.round(ride.durationS / 60)
+            : Math.round(estFare.durationMinutes);
 
       return {
         ...ride,
@@ -2841,11 +2913,13 @@ export class RidesService {
     driverId: string,
     from: DriverStatus[] = [DriverStatus.RESERVED],
   ): Promise<void> {
-    await this.driverProfiles.update(
+    const released = await this.driverProfiles.update(
       { userId: driverId, status: In(from) },
       { status: DriverStatus.ONLINE, idleSince: new Date() },
     );
-    await clearLiveTrack(this.redis, driverId);
+    if (released.affected) await this.invalidateDriverStatusCache(driverId);
+    // GPS delivery rechecks the current PostgreSQL assignment; do not blindly
+    // clear a cache that may already belong to a new trip.
   }
 
   private async driverHasLiveTrip(driverId: string): Promise<boolean> {
@@ -2995,6 +3069,7 @@ export class RidesService {
       profile.connectedAccountId = connectedAccountId;
     }
     await this.driverProfiles.save(profile);
+    await this.invalidateDriverStatusCache(driverId);
 
     if (!online) {
       // Drop the live GPS pin now rather than leaving it to expire, so an
@@ -3050,68 +3125,177 @@ export class RidesService {
     return driverError?.code === '23505';
   }
 
-  /** Ride↔driver chat lives for 14 days, then the daily purge deletes it. */
-  static readonly RIDE_CHAT_RETENTION_DAYS = 14;
-
-  /** Participants only — chat history for an active or recent ride. */
-  async listRideMessages(rideId: string, viewerId: string) {
+  /** Durable history; visibility stays tied to the original message participants. */
+  async listRideMessages(
+    rideId: string,
+    viewerId: string,
+    query: ListRideMessagesDto = {},
+  ) {
     await this.assertRideParticipant(rideId, viewerId);
-    return this.rideChatThread(rideId);
+    return this.rideChatThread(rideId, query, viewerId);
   }
 
-  /** Ops staff can look up a trip thread while it is still retained. */
-  async listRideMessagesForStaff(rideId: string) {
+  async listRideMessagesForStaff(
+    rideId: string,
+    query: ListRideMessagesDto = {},
+  ) {
     const ride = await this.rides.findOne({ where: { id: rideId } });
     if (!ride) throw new NotFoundException('Ride not found');
-    return this.rideChatThread(rideId);
+    return this.rideChatThread(rideId, query);
   }
 
-  private async rideChatThread(rideId: string) {
-    const messages = await this.rideMessages.find({
-      where: { rideId },
-      order: { createdAt: 'ASC' },
-      take: 500,
-    });
-    const retentionMs =
-      RidesService.RIDE_CHAT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-    const newest = messages[messages.length - 1]?.createdAt ?? new Date();
-    const expiresAt = new Date(new Date(newest).getTime() + retentionMs);
+  private async rideChatThread(
+    rideId: string,
+    query: ListRideMessagesDto,
+    viewerId?: string,
+  ) {
+    const limit = Math.min(100, Math.max(1, query.limit ?? 50));
+    const builder = this.rideMessages
+      .createQueryBuilder('m')
+      .where('m.rideId = :rideId', { rideId });
+    if (viewerId)
+      builder.andWhere('(m.senderId = :viewerId OR m.receiverId = :viewerId)', {
+        viewerId,
+      });
+    if (query.before) {
+      const cursor = await this.rideMessages.findOne({
+        where: { id: query.before, rideId },
+      });
+      if (
+        !cursor ||
+        (viewerId &&
+          cursor.senderId !== viewerId &&
+          cursor.receiverId !== viewerId)
+      ) {
+        throw new BadRequestException('Invalid message cursor');
+      }
+      // Compare in PostgreSQL to preserve sub-millisecond timestamp precision.
+      builder.andWhere(
+        '(m."createdAt", m.id) < (SELECT "createdAt", id FROM ride_messages WHERE id = :before)',
+        { before: query.before },
+      );
+    }
+    const rows = await builder
+      .orderBy('m.createdAt', 'DESC')
+      .addOrderBy('m.id', 'DESC')
+      .take(limit + 1)
+      .getMany();
+    const page = rows.slice(0, limit);
     return {
       threadId: rideId,
-      retentionDays: RidesService.RIDE_CHAT_RETENTION_DAYS,
-      expiresAt,
-      messages,
+      retentionDays: null,
+      expiresAt: null,
+      nextCursor: rows.length > limit ? page[page.length - 1].id : null,
+      messages: page
+        .reverse()
+        .map((message) => this.chatMessagePayload(message)),
     };
   }
 
-  async sendRideMessage(rideId: string, senderId: string, body: string) {
+  private chatMessagePayload(message: RideMessage) {
+    return {
+      ...message,
+      conversationId: message.rideId,
+      messageType: 'text',
+      status: message.readAt ? 'read' : 'sent',
+    };
+  }
+
+  async sendRideMessage(
+    rideId: string,
+    senderId: string,
+    body: string,
+    clientMessageId?: string,
+  ) {
     const ride = await this.assertRideParticipant(rideId, senderId);
     const trimmed = body.trim();
-    if (!trimmed) {
-      throw new ConflictException('Message body is required');
+    if (!trimmed || trimmed.length > 1000) {
+      throw new BadRequestException(
+        'Message body must contain 1–1000 characters',
+      );
     }
-    const message = await this.rideMessages.save(
-      this.rideMessages.create({
-        rideId,
-        senderId,
-        body: trimmed.slice(0, 1000),
-      }),
-    );
-    const recipientId =
-      ride.riderId === senderId ? ride.driverId : ride.riderId;
-    if (recipientId) {
-      await this.notify(recipientId, 'ride.chat_message', {
-        rideId,
-        message: {
-          id: message.id,
-          rideId: message.rideId,
-          senderId: message.senderId,
-          body: message.body,
-          createdAt: message.createdAt,
-        },
+    const receiverId = ride.riderId === senderId ? ride.driverId : ride.riderId;
+    if (!receiverId)
+      throw new ConflictException('A driver must be assigned before messaging');
+    let message: RideMessage;
+    try {
+      message = await this.rideMessages.save(
+        this.rideMessages.create({
+          rideId,
+          senderId,
+          receiverId,
+          senderType: ride.riderId === senderId ? 'rider' : 'driver',
+          body: trimmed,
+          clientMessageId: clientMessageId ?? null,
+        }),
+      );
+    } catch (error) {
+      if (!clientMessageId || !this.isUniqueViolation(error)) throw error;
+      const existing = await this.rideMessages.findOne({
+        where: { rideId, senderId, clientMessageId },
       });
+      if (
+        !existing ||
+        existing.body !== trimmed ||
+        existing.receiverId !== receiverId
+      ) {
+        throw new ConflictException('Message id has already been used');
+      }
+      return this.chatMessagePayload(existing);
     }
-    return message;
+    const payload = this.chatMessagePayload(message);
+    await Promise.all(
+      [receiverId, senderId].map((id) =>
+        this.notify(id, 'ride.chat_message', { rideId, message: payload }),
+      ),
+    );
+    return payload;
+  }
+
+  async readRideMessages(
+    rideId: string,
+    viewerId: string,
+    throughMessageId: string,
+  ) {
+    await this.assertRideParticipant(rideId, viewerId);
+    const through = await this.rideMessages.findOne({
+      where: { id: throughMessageId, rideId },
+    });
+    if (
+      !through ||
+      (through.senderId !== viewerId && through.receiverId !== viewerId)
+    ) {
+      throw new BadRequestException('Invalid message cursor');
+    }
+    const readAt = new Date();
+    const updated = await this.rideMessages
+      .createQueryBuilder()
+      .update()
+      .set({ readAt })
+      .where(
+        '"rideId" = :rideId AND "receiverId" = :viewerId AND "readAt" IS NULL',
+        { rideId, viewerId },
+      )
+      .andWhere(
+        '("createdAt", id) <= (SELECT "createdAt", id FROM ride_messages WHERE id = :throughMessageId)',
+        { throughMessageId },
+      )
+      .returning(['senderId'])
+      .execute();
+    const senders = new Set(
+      (updated.raw as Array<{ senderId: string }>).map((row) => row.senderId),
+    );
+    await Promise.all(
+      [...senders].map((senderId) =>
+        this.notify(senderId, 'ride.chat_read', {
+          rideId,
+          readerId: viewerId,
+          throughMessageId,
+          readAt,
+        }),
+      ),
+    );
+    return { readAt };
   }
 
   private async assertRideParticipant(rideId: string, userId: string) {
@@ -3122,22 +3306,6 @@ export class RidesService {
       throw new ForbiddenException('You are not a participant on this ride');
     }
     return ride;
-  }
-
-  /** Drop ride chat after 14 days so trip threads do not linger forever. */
-  @Cron(CronExpression.EVERY_DAY_AT_4AM)
-  async purgeExpiredRideMessages() {
-    const cutoff = new Date(
-      Date.now() - RidesService.RIDE_CHAT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
-    );
-    const result = await this.rideMessages.delete({
-      createdAt: LessThan(cutoff),
-    });
-    if (result.affected) {
-      this.logger.log(
-        `Purged ${result.affected} ride chat message(s) older than ${RidesService.RIDE_CHAT_RETENTION_DAYS} days`,
-      );
-    }
   }
 }
 

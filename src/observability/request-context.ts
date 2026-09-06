@@ -16,12 +16,8 @@ export function getRequestId(): string | undefined {
 export function resolveOrCreateRequestId(
   headerValue: string | string[] | undefined,
 ): string {
-  if (typeof headerValue === 'string' && headerValue.trim()) {
-    return headerValue.trim().slice(0, 128);
-  }
-  if (Array.isArray(headerValue) && headerValue[0]) {
-    return String(headerValue[0]).trim().slice(0, 128);
-  }
+  const candidate = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  if (candidate && /^[A-Za-z0-9._:-]{1,128}$/.test(candidate)) return candidate;
   return randomUUID();
 }
 

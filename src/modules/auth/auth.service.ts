@@ -8,7 +8,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThan, Repository } from 'typeorm';
+import { EntityManager, LessThan, Repository } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import * as bcrypt from 'bcrypt';
@@ -183,6 +183,13 @@ export class AuthService {
           roles: roles.length > 0 ? roles : [UserRole.RIDER],
         }),
       );
+    } else if (
+      dto.roles?.includes(UserRole.DRIVER) &&
+      !user.roles?.includes(UserRole.DRIVER)
+    ) {
+      user.roles = [...(user.roles ?? []), UserRole.DRIVER];
+      user = await this.users.save(user);
+      this.authContextCache.delete(user.id);
     }
 
     if (isAccountClosed(user.standing)) {
@@ -301,54 +308,81 @@ export class AuthService {
    */
   async refresh(rawRefreshToken: string) {
     const tokenHash = this.hashToken(rawRefreshToken);
+    const candidate = await this.refreshTokens.findOne({
+      where: { tokenHash },
+    });
+    if (!candidate) throw new UnauthorizedException('Invalid refresh token');
 
-    return this.refreshTokens.manager.transaction(async (em) => {
-      const existing = await em
-        .createQueryBuilder(RefreshToken, 'rt')
-        .setLock('pessimistic_write')
-        .where('rt.tokenHash = :tokenHash', { tokenHash })
-        .getOne();
+    // Serialize the whole user's rotation/revocation family, not just one token.
+    // All token writes share this transaction; rejected outcomes are thrown only
+    // after commit so reuse/expiry revocation is not rolled back by an exception.
+    const result = await this.refreshTokens.manager.transaction(async (em) => {
+      const user = await em.findOne(UserAccount, {
+        where: { id: candidate.userId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!user)
+        return { error: new UnauthorizedException('Account not found') };
 
-      if (!existing) {
-        throw new UnauthorizedException('Invalid refresh token');
-      }
-
+      const existing = await em.findOne(RefreshToken, {
+        where: { tokenHash },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!existing)
+        return { error: new UnauthorizedException('Invalid refresh token') };
       if (existing.revokedAt) {
-        await this.revokeAllForUser(existing.userId);
-        throw new UnauthorizedException(
-          'Refresh token reuse detected — sessions revoked',
-        );
+        await this.revokeAllForUser(existing.userId, em);
+        return {
+          error: new UnauthorizedException(
+            'Refresh token reuse detected — sessions revoked',
+          ),
+        };
       }
-
+      if (isAccountClosed(user.standing)) {
+        await this.revokeAllForUser(user.id, em);
+        return {
+          error: new ForbiddenException('This account is not available'),
+        };
+      }
       if (existing.expiresAt.getTime() <= Date.now()) {
         existing.revokedAt = new Date();
         await em.save(existing);
-        throw new UnauthorizedException('Refresh token expired');
+        return { error: new UnauthorizedException('Refresh token expired') };
       }
-
-      const user = await em.findOne(UserAccount, {
-        where: { id: existing.userId },
-      });
-      if (!user) {
-        throw new UnauthorizedException();
-      }
-
-      // Issue pair outside the locked row write path via repository helpers,
-      // then mark the old token revoked under the same transaction.
-      const pair = await this.issueTokenPair(user);
+      const pair = await this.issueTokenPair(user, em);
       existing.revokedAt = new Date();
       existing.replacedById = pair.refreshTokenId;
       await em.save(existing);
-
-      return {
-        accessToken: pair.accessToken,
-        refreshToken: pair.refreshToken,
-        user: pair.user,
-      };
+      return { pair };
     });
+    if (result.error) throw result.error;
+    const pair = result.pair!;
+    return {
+      accessToken: pair.accessToken,
+      refreshToken: pair.refreshToken,
+      user: pair.user,
+    };
   }
 
   /** Revoke one refresh session; optionally denylist current access `jti`. */
+  async logoutWithAccessToken(rawRefreshToken: string, authorization?: string) {
+    let jti: string | undefined;
+    if (authorization?.startsWith('Bearer ')) {
+      try {
+        const payload = this.jwt.verify<{ typ?: string; jti?: string }>(
+          authorization.slice(7),
+          {
+            secret: this.config.get<string>('JWT_ACCESS_SECRET'),
+          },
+        );
+        if (payload.typ === 'access') jti = payload.jti;
+      } catch {
+        /* An expired access token must not prevent refresh-session revocation. */
+      }
+    }
+    return this.logout(rawRefreshToken, jti);
+  }
+
   async logout(rawRefreshToken: string | undefined, accessJti?: string) {
     if (rawRefreshToken) {
       const tokenHash = this.hashToken(rawRefreshToken);
@@ -389,7 +423,9 @@ export class AuthService {
     });
   }
 
-  private async issueTokenPair(user: UserAccount) {
+  private async issueTokenPair(user: UserAccount, manager?: EntityManager) {
+    const refreshTokens =
+      manager?.getRepository(RefreshToken) ?? this.refreshTokens;
     const jti = randomUUID();
     const payload = {
       sub: user.id,
@@ -408,8 +444,8 @@ export class AuthService {
     const tokenHash = this.hashToken(rawRefresh);
     const expiresAt = this.refreshExpiresAt();
 
-    const row = await this.refreshTokens.save(
-      this.refreshTokens.create({
+    const row = await refreshTokens.save(
+      refreshTokens.create({
         userId: user.id,
         tokenHash,
         expiresAt,
@@ -432,8 +468,18 @@ export class AuthService {
     };
   }
 
-  private async revokeAllForUser(userId: string) {
-    await this.refreshTokens
+  private async revokeAllForUser(userId: string, manager?: EntityManager) {
+    if (!manager) {
+      await this.refreshTokens.manager.transaction(async (em) => {
+        await em.findOne(UserAccount, {
+          where: { id: userId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        await this.revokeAllForUser(userId, em);
+      });
+      return;
+    }
+    await (manager?.getRepository(RefreshToken) ?? this.refreshTokens)
       .createQueryBuilder()
       .update(RefreshToken)
       .set({ revokedAt: new Date() })

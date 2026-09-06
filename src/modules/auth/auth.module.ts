@@ -31,7 +31,13 @@ import { FirebaseService } from './firebase/firebase.service';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, OtpService, SmsService, FirebaseService],
+  providers: [
+    AuthService,
+    JwtStrategy,
+    OtpService,
+    SmsService,
+    FirebaseService,
+  ],
   exports: [AuthService, OtpService, FirebaseService, TypeOrmModule],
 })
 export class AuthModule {}

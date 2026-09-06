@@ -14,6 +14,10 @@ import { RequestRideDto } from './dto/request-ride.dto';
 import { TransitionRideDto } from './dto/transition-ride.dto';
 import { ListRidesDto } from './dto/list-rides.dto';
 import { SendRideMessageDto } from './dto/send-ride-message.dto';
+import {
+  ListRideMessagesDto,
+  ReadRideMessagesDto,
+} from './dto/list-ride-messages.dto';
 import { LookupRiderDto } from './dto/lookup-rider.dto';
 import { DriverInitiatedRideDto } from './dto/driver-initiated-ride.dto';
 import { StartRideDto } from './dto/start-ride.dto';
@@ -106,8 +110,9 @@ export class RidesController {
   listMessages(
     @CurrentUser() user: AuthedUser,
     @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: ListRideMessagesDto,
   ) {
-    return this.ridesService.listRideMessages(id, user.userId);
+    return this.ridesService.listRideMessages(id, user.userId, query);
   }
 
   @UseGuards(JwtAuthGuard, RedisRateLimitGuard)
@@ -118,7 +123,27 @@ export class RidesController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: SendRideMessageDto,
   ) {
-    return this.ridesService.sendRideMessage(id, user.userId, dto.body);
+    return this.ridesService.sendRideMessage(
+      id,
+      user.userId,
+      dto.body,
+      dto.clientMessageId,
+    );
+  }
+
+  @UseGuards(JwtAuthGuard, RedisRateLimitGuard)
+  @RateLimit(RateLimitPresets.chat)
+  @Post(':id/messages/read')
+  readMessages(
+    @CurrentUser() user: AuthedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReadRideMessagesDto,
+  ) {
+    return this.ridesService.readRideMessages(
+      id,
+      user.userId,
+      dto.throughMessageId,
+    );
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)

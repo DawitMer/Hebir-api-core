@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
 import { Ride } from './entities/ride.entity';
+import { RideRouteCheckpoint } from './entities/ride-route-checkpoint.entity';
 import { RideStatusEvent } from './entities/ride-status-event.entity';
 import { RideMessage } from './entities/ride-message.entity';
 import { FareRecord } from './entities/fare-record.entity';
@@ -28,6 +29,7 @@ import { TripRouteRecorderService } from './trip-route-recorder.service';
     ScheduleModule.forRoot(),
     TypeOrmModule.forFeature([
       Ride,
+      RideRouteCheckpoint,
       RideStatusEvent,
       RideMessage,
       FareRecord,

@@ -22,6 +22,20 @@ function prodBase(): Record<string, unknown> {
 }
 
 describe('production env gates', () => {
+  it('reports invalid field names without leaking configuration values', () => {
+    const env: Record<string, unknown> = {
+      ...prodBase(),
+      PORT: 'sensitive-invalid-value',
+    };
+    expect(() => validate(env)).toThrow(/PORT/);
+    try {
+      validate(env);
+    } catch (error) {
+      expect((error as Error).message).not.toContain('sensitive-invalid-value');
+      expect((error as Error).message).not.toContain(env.JWT_ACCESS_SECRET);
+    }
+  });
+
   it('starts when SMS, Redis, CORS, and tokens are set', () => {
     expect(() => validate(prodBase())).not.toThrow();
   });

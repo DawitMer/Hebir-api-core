@@ -39,7 +39,7 @@ Demand heat: `GET /demand/grid` → location-svc Redis cells.
 
 Matching layout: [`src/modules/matching/README.md`](src/modules/matching/README.md).  
 Team docs: [`../docs/MODULE_MAP.md`](../docs/MODULE_MAP.md), [`../docs/MATCHING.md`](../docs/MATCHING.md).  
-Backups / PITR: [`../docs/BACKUP_PITR.md`](../docs/BACKUP_PITR.md); optional dump workflow under [`.github/workflows/`](.github/workflows/).  
+Backups / PITR: [`../docs/BACKUP_PITR.md`](../docs/BACKUP_PITR.md). This monorepo now has root [CI](../.github/workflows/ci.yml) and [manual backup](../.github/workflows/backup.yml) workflows; component [`ci/github-workflows/`](ci/github-workflows/) files remain standalone templates. See [release configuration](../docs/RELEASE_CONFIGURATION.md) for setup and the [current report](../RELEASE_READINESS.md) for verification limits.
 Secrets (prod): [`../docs/SECRETS.md`](../docs/SECRETS.md); template [`secrets.example.json`](secrets.example.json).
 
 See [`../docs/STACK.md`](../docs/STACK.md) for the full local stack.

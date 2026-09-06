@@ -86,7 +86,6 @@ export class OtpService {
 
     if (isDevOrTest) {
       this.logger.log(`[DEV OTP] Phone: ${phoneNumber} (code omitted in prod)`);
-      console.log(`\n\n[DEV OTP] Phone: ${phoneNumber} Code: ${code}\n\n`);
       return { sent: true, expiresInSec: OTP_TTL_SEC, debugCode: code };
     }
 

@@ -379,6 +379,21 @@ class EnvironmentVariables {
   @IsString()
   FCM_SERVICE_ACCOUNT_JSON?: string;
 
+  /** Firebase/Google Cloud project used by Admin SDK application defaults. */
+  @IsOptional()
+  @IsString()
+  FIREBASE_PROJECT_ID?: string;
+
+  /** Optional inline Admin SDK JSON; prefer a mounted credential file. */
+  @IsOptional()
+  @IsString()
+  FIREBASE_SERVICE_ACCOUNT_JSON?: string;
+
+  /** Mounted Google service-account JSON used by Firebase Admin and FCM. */
+  @IsOptional()
+  @IsString()
+  GOOGLE_APPLICATION_CREDENTIALS?: string;
+
   @IsOptional()
   @IsIn(['true', 'false'])
   OTEL_ENABLED?: string;
@@ -407,10 +422,13 @@ export function validate(config: Record<string, unknown>) {
   });
   const errors = validateSync(validatedConfig, {
     skipMissingProperties: false,
+    validationError: { target: false, value: false },
   });
 
   if (errors.length > 0) {
-    throw new Error(errors.toString());
+    throw new Error(
+      `Invalid environment configuration: ${errors.map((error) => error.property).join(', ')}`,
+    );
   }
 
   if (validatedConfig.NODE_ENV === 'production') {

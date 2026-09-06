@@ -18,10 +18,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { UserRole } from '../auth/entities/user-account.entity';
 
 function clientIp(req: Request): string {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.length > 0) {
-    return forwarded.split(',')[0].trim();
-  }
+  // Express applies the configured trusted-proxy boundary; never trust a
+  // caller's raw X-Forwarded-For when recording government access audits.
   return req.ip || req.socket.remoteAddress || 'unknown';
 }
 

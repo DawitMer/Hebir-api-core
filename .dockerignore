@@ -5,6 +5,10 @@ coverage
 .env.*
 !.env.example
 secrets.json
+secrets/
+*firebase-adminsdk*.json
+*.pem
+*.key
 *.log
 .git
 .github

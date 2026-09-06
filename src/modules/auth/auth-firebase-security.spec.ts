@@ -16,7 +16,6 @@ import { REDIS_CLIENT } from '../../redis/redis.module';
 
 describe('FirebaseAuthSecuritySpec', () => {
   let authService: AuthService;
-  let firebaseService: FirebaseService;
 
   const mockUsers: Map<string, UserAccount> = new Map();
 
@@ -114,7 +113,6 @@ describe('FirebaseAuthSecuritySpec', () => {
     }).compile();
 
     authService = module.get<AuthService>(AuthService);
-    firebaseService = module.get<FirebaseService>(FirebaseService);
   });
 
   describe('Security Guard 1: Fake & Malformed Token Rejection', () => {

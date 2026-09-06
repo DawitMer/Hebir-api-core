@@ -144,17 +144,21 @@ export class FareController {
       ['surgeMaxMultiplier', FareRateKeys.surgeMaxMultiplier],
     ];
 
+    const updates: Array<{ key: string; value: number; description: string }> =
+      [];
     for (const [field, key] of mapping) {
       const value = dto[field];
       if (typeof value === 'number') {
-        await this.configuration.set(
+        updates.push({
           key,
           value,
-          FARE_RATE_DESCRIPTIONS[key as keyof typeof FARE_RATE_DESCRIPTIONS],
-        );
+          description:
+            FARE_RATE_DESCRIPTIONS[key as keyof typeof FARE_RATE_DESCRIPTIONS],
+        });
       }
     }
 
+    await this.configuration.setMany(updates);
     return this.fareService.ratesPublicView();
   }
 }

@@ -4,7 +4,7 @@
 **Production:** load secrets from **AWS Secrets Manager** (or a mounted JSON file).  
 Do not ship long-lived production secrets only in a `.env` on disk.
 
-See also: [`docs/SECRETS.md`](../../../docs/SECRETS.md).
+See also: [`docs/SECRETS.md`](../../../../docs/SECRETS.md).
 
 ## Boot
 

@@ -43,7 +43,12 @@ export class UserAccount {
    * Partial unique index ensures fast lookup and prevents duplicate Firebase UID bindings.
    */
   @Index({ unique: true, where: '"firebase_uid" IS NOT NULL' })
-  @Column({ name: 'firebase_uid', type: 'varchar', length: 128, nullable: true })
+  @Column({
+    name: 'firebase_uid',
+    type: 'varchar',
+    length: 128,
+    nullable: true,
+  })
   firebaseUid: string | null;
 
   @Column({ name: 'phone_verified_at', type: 'timestamptz', nullable: true })

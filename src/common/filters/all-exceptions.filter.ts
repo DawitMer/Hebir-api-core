@@ -57,9 +57,16 @@ export class AllExceptionsFilter implements ExceptionFilter {
   private log(status: number, req: Request, exception: unknown) {
     const err =
       exception instanceof Error ? exception : new Error(String(exception));
-    const line = `${req.method ?? '?'} ${req.url ?? '?'} ${status}: ${err.message}`;
+    const detail =
+      exception instanceof QueryFailedError
+        ? 'Database request failed'
+        : err.message;
+    const line = `${req.method ?? '?'} ${req.url?.split('?')[0] ?? '?'} ${status}: ${detail}`;
     if (status >= 500) {
-      this.logger.error(line, err.stack);
+      this.logger.error(
+        line,
+        exception instanceof QueryFailedError ? undefined : err.stack,
+      );
     } else {
       this.logger.warn(line);
     }

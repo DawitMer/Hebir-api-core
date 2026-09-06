@@ -114,8 +114,11 @@ export class FareService {
    * Initial fee and per-meter rate are independent DB keys — change one
    * without touching the other.
    */
-  async calculate(input: FareCalculationInput): Promise<FareBreakdown> {
-    const rates = this.getRates();
+  async calculate(
+    input: FareCalculationInput,
+    rateSnapshot?: FareRates | null,
+  ): Promise<FareBreakdown> {
+    const rates = rateSnapshot ?? this.getRates();
     const distanceMeters = Math.max(0, input.distanceKm) * 1000;
     const durationMinutes = Math.max(0, input.durationMinutes);
     const waitMinutes = Math.max(0, input.waitMinutes ?? 0);
@@ -144,10 +147,13 @@ export class FareService {
 
     // Scale component charges with multiplier and reconcile with total
     // so receipts, driver earnings, and rider invoices always sum exactly to total.
-    const distanceScaled = Math.round(distanceCharge * combinedMultiplier * 100) / 100;
+    const distanceScaled =
+      Math.round(distanceCharge * combinedMultiplier * 100) / 100;
     const timeScaled = Math.round(timeCharge * combinedMultiplier * 100) / 100;
     const waitScaled = Math.round(waitCharge * combinedMultiplier * 100) / 100;
-    const initialScaled = Math.round((total - distanceScaled - timeScaled - waitScaled) * 100) / 100;
+    const initialScaled =
+      Math.round((total - distanceScaled - timeScaled - waitScaled) * 100) /
+      100;
 
     return {
       vehicleMultiplier,

@@ -46,10 +46,11 @@ export class FirebaseService implements OnModuleInit {
       return;
     }
 
-    const projectId =
+    const projectId = (
       this.config.get<string>('FIREBASE_PROJECT_ID') ||
       process.env.FIREBASE_PROJECT_ID ||
-      'hebir-ride';
+      ''
+    ).trim();
 
     const emulatorHost =
       this.config.get<string>('FIREBASE_AUTH_EMULATOR_HOST') ||
@@ -57,9 +58,7 @@ export class FirebaseService implements OnModuleInit {
 
     if (emulatorHost) {
       process.env.FIREBASE_AUTH_EMULATOR_HOST = emulatorHost;
-      this.logger.log(
-        `Firebase Auth Emulator configured at: ${emulatorHost}`,
-      );
+      this.logger.log(`Firebase Auth Emulator configured at: ${emulatorHost}`);
     }
 
     const saPath =
@@ -72,10 +71,12 @@ export class FirebaseService implements OnModuleInit {
       process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 
     try {
+      const certFn =
+        this.firebaseAdmin.credential?.cert ?? this.firebaseAdmin.cert;
       if (saInline) {
         const credentials = JSON.parse(saInline);
         this.firebaseApp = this.firebaseAdmin.initializeApp({
-          credential: this.firebaseAdmin.credential.cert(credentials),
+          credential: certFn ? certFn(credentials) : undefined,
           projectId: credentials.project_id || projectId,
         });
         this.initialized = true;
@@ -85,7 +86,7 @@ export class FirebaseService implements OnModuleInit {
       } else if (fs.existsSync(saPath)) {
         const credentials = JSON.parse(fs.readFileSync(saPath, 'utf8'));
         this.firebaseApp = this.firebaseAdmin.initializeApp({
-          credential: this.firebaseAdmin.credential.cert(credentials),
+          credential: certFn ? certFn(credentials) : undefined,
           projectId: credentials.project_id || projectId,
         });
         this.initialized = true;
@@ -93,12 +94,14 @@ export class FirebaseService implements OnModuleInit {
           `Firebase Admin initialized via credentials file (${saPath}) for project: ${projectId}`,
         );
       } else {
-        this.firebaseApp = this.firebaseAdmin.initializeApp({
-          projectId,
-        });
+        this.firebaseApp = this.firebaseAdmin.initializeApp(
+          projectId ? { projectId } : undefined,
+        );
         this.initialized = true;
         this.logger.log(
-          `Firebase Admin initialized with default projectId: ${projectId}`,
+          projectId
+            ? `Firebase Admin initialized with configured projectId: ${projectId}`
+            : 'Firebase Admin initialized with application default credentials',
         );
       }
     } catch (error) {
@@ -121,7 +124,8 @@ export class FirebaseService implements OnModuleInit {
     // Test / Dev-mode deterministic tokens (e.g. test-token:+251911223344 or mock-firebase:phone:uid)
     if (
       process.env.NODE_ENV !== 'production' &&
-      (idToken.startsWith('test-token:') || idToken.startsWith('mock-firebase:'))
+      (idToken.startsWith('test-token:') ||
+        idToken.startsWith('mock-firebase:'))
     ) {
       const parts = idToken.split(':');
       const phoneNumber = parts[1] || '+251911000001';

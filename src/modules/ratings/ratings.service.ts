@@ -53,44 +53,43 @@ export class RatingsService {
       throw new ConflictException('You have already rated this ride');
     }
 
-    const rating = await this.ratings.save(
-      this.ratings.create({
-        rideId: ride.id,
-        ratedBy,
-        ratedUser,
-        stars: dto.stars,
-        comment: dto.comment ?? null,
-      }),
-    );
-
-    if (ratedUser === ride.driverId) {
-      await this.recomputeDriverRating(ratedUser);
-    }
+    const rating = await this.ratings.manager.transaction(async (em) => {
+      // Serialize driver aggregate updates without saving a stale whole profile.
+      if (ratedUser === ride.driverId) {
+        await em.findOne(DriverProfile, {
+          where: { userId: ratedUser },
+          lock: { mode: 'pessimistic_write' },
+        });
+      }
+      const saved = await em.save(
+        em.create(Rating, {
+          rideId: ride.id,
+          ratedBy,
+          ratedUser,
+          stars: dto.stars,
+          comment: dto.comment ?? null,
+        }),
+      );
+      if (ratedUser === ride.driverId) {
+        const latest = await em.find(Rating, {
+          where: { ratedUser },
+          order: { createdAt: 'DESC', id: 'DESC' },
+          take: 100,
+        });
+        const average =
+          latest.reduce((sum, row) => sum + row.stars, 0) / latest.length;
+        await em.update(
+          DriverProfile,
+          { userId: ratedUser },
+          { ratingAvg: average.toFixed(2) },
+        );
+      }
+      return saved;
+    });
 
     this.logger.log(
       `Rating ${rating.id}: ${dto.stars}★ for ${ratedUser} (by ${ratedBy}) on ride ${ride.id}`,
     );
     return rating;
-  }
-
-  private async recomputeDriverRating(driverId: string): Promise<void> {
-    const lastRatings = await this.ratings.find({
-      where: { ratedUser: driverId },
-      order: { createdAt: 'DESC' },
-      take: 100,
-    });
-
-    if (lastRatings.length === 0) return;
-
-    const sum = lastRatings.reduce((acc, r) => acc + r.stars, 0);
-    const avg = sum / lastRatings.length;
-
-    const profile = await this.driverProfiles.findOne({
-      where: { userId: driverId },
-    });
-    if (profile) {
-      profile.ratingAvg = String(Math.round(avg * 100) / 100);
-      await this.driverProfiles.save(profile);
-    }
   }
 }

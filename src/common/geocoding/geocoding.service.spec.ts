@@ -15,8 +15,7 @@ describe('GeocodingService & GoogleRoutesService', () => {
 
     const mockConfig = {
       get: jest.fn((key: string) => {
-        if (key === 'GOOGLE_MAPS_API_KEY')
-          return 'AIzaSyALT734q6tNofHYu4TCrVtjHoOiw39PJXI';
+        if (key === 'GOOGLE_MAPS_API_KEY') return 'test-google-maps-key';
         if (key === 'GEOCODING_ONLINE') return 'false'; // offline fallback test
         return undefined;
       }),

@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { QueryFailedError, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Tip, TipStatus } from './entities/tip.entity';
 import { Ride, RideStatus } from '../rides/entities/ride.entity';
@@ -76,7 +76,21 @@ export class TipsService {
       const existingTip = await this.tips.findOne({
         where: { paymentId: existingPayment.id },
       });
-      if (existingTip) return existingTip;
+      if (existingTip) {
+        if (
+          existingPayment.userId !== riderId ||
+          existingTip.rideId !== ride.id ||
+          Number(existingTip.amount) !== dto.amount
+        ) {
+          throw new ConflictException(
+            'Idempotency key was already used for another request',
+          );
+        }
+        return existingTip;
+      }
+      throw new ConflictException(
+        'Idempotency key was already used for another request',
+      );
     }
 
     // Never trust client-supplied driverId — always derive from the ride.
@@ -86,49 +100,81 @@ export class TipsService {
     // Payment + tip + earning are atomic. Cash tips settle immediately —
     // the rider handing cash to the driver *is* collection. Digital PSPs
     // stay unwired; do not mark a Telebirr/Chapa tip succeeded here.
-    const tip = await this.payments.manager.transaction(async (em) => {
-      const payment = await em.save(
-        em.create(PaymentRecord, {
-          userId: riderId,
-          rideId: ride.id,
-          type: PaymentType.TIP,
-          amount,
-          idempotencyKey: dto.idempotencyKey,
-          status: PaymentStatus.CASH_COLLECTED,
-          providerReference: `cash:tip:${ride.id}`,
-          applicationFeeAmount: '0',
-        }),
-      );
+    let tip: Tip;
+    try {
+      tip = await this.payments.manager.transaction(async (em) => {
+        const payment = await em.save(
+          em.create(PaymentRecord, {
+            userId: riderId,
+            rideId: ride.id,
+            type: PaymentType.TIP,
+            amount,
+            idempotencyKey: dto.idempotencyKey,
+            status: PaymentStatus.CASH_COLLECTED,
+            providerReference: `cash:tip:${ride.id}`,
+            applicationFeeAmount: '0',
+          }),
+        );
 
-      const savedTip = await em.save(
-        em.create(Tip, {
-          rideId: ride.id,
-          riderId,
-          driverId,
-          amount,
-          paymentId: payment.id,
-          status: TipStatus.SUCCEEDED,
-        }),
-      );
+        const savedTip = await em.save(
+          em.create(Tip, {
+            rideId: ride.id,
+            riderId,
+            driverId,
+            amount,
+            paymentId: payment.id,
+            status: TipStatus.SUCCEEDED,
+          }),
+        );
 
-      await em.save(
-        em.create(DriverEarning, {
-          driverId,
-          sourceType: EarningSourceType.TIP,
-          sourceId: savedTip.id,
-          amount: savedTip.amount,
-          payoutStatus: PayoutStatus.PAID,
-        }),
-      );
+        await em.save(
+          em.create(DriverEarning, {
+            driverId,
+            sourceType: EarningSourceType.TIP,
+            sourceId: savedTip.id,
+            amount: savedTip.amount,
+            payoutStatus: PayoutStatus.PAID,
+          }),
+        );
 
-      return savedTip;
-    });
+        return savedTip;
+      });
+    } catch (error) {
+      if (
+        error instanceof QueryFailedError &&
+        (error.driverError as { code?: string }).code === '23505'
+      ) {
+        const payment = await this.payments.findOne({
+          where: { idempotencyKey: dto.idempotencyKey },
+        });
+        const saved =
+          payment &&
+          (await this.tips.findOne({ where: { paymentId: payment.id } }));
+        if (
+          saved &&
+          payment.userId === riderId &&
+          saved.rideId === ride.id &&
+          Number(saved.amount) === dto.amount
+        )
+          return saved;
+        throw new ConflictException(
+          'Idempotency key was already used for another request',
+        );
+      }
+      throw error;
+    }
 
-    await this.notifications.notify(driverId, 'tip.received', {
-      rideId: ride.id,
-      tipId: tip.id,
-      amount: tip.amount,
-    });
+    await this.notifications
+      .notify(driverId, 'tip.received', {
+        rideId: ride.id,
+        tipId: tip.id,
+        amount: tip.amount,
+      })
+      .catch((error: Error) => {
+        this.logger.warn(
+          `Tip ${tip.id} saved but notification failed: ${error.message}`,
+        );
+      });
 
     this.logger.log(
       `Tip ${tip.id}: ${tip.amount} from rider ${riderId} to driver ${driverId} for ride ${ride.id}`,

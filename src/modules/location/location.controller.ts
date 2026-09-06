@@ -35,13 +35,7 @@ import { LocationSvcClient } from '../../common/location-svc/location-svc.client
 import { SubscriptionService } from '../subscription/subscription.service';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
 import { Ride, RideStatus } from '../rides/entities/ride.entity';
-import {
-  liveTrackFromRide,
-  liveTrackKey,
-  parseLiveTrack,
-  writeLiveTrack,
-  LIVE_TRACK_TTL_SEC,
-} from '../rides/ride-live-track';
+import { liveTrackFromRide, writeLiveTrack } from '../rides/ride-live-track';
 import { remainingEta } from '../rides/remaining-eta';
 import { GeocodingService } from '../../common/geocoding/geocoding.service';
 import { TripRouteRecorderService } from '../rides/trip-route-recorder.service';
@@ -103,17 +97,28 @@ export class LocationController {
   }
 
   /** Redis-cached subscription gate to keep the GPS ping path off the DB. */
+  /** Redis-cached driver status to keep the GPS ping path off the DB. */
+  private async getDriverStatusCached(driverId: string): Promise<DriverStatus> {
+    const key = `driver:status:${driverId}`;
+    const cached = await this.redis.get(key).catch(() => null);
+    if (cached !== null) return cached as DriverStatus;
+    const profile = await this.driverProfiles.findOne({
+      where: { userId: driverId },
+      select: { status: true },
+    });
+    const status = profile?.status ?? DriverStatus.OFFLINE;
+    await this.redis.set(key, status, 'EX', 60).catch(() => undefined);
+    return status;
+  }
+
   private async isSubscribedCached(driverId: string): Promise<boolean> {
     const key = `sub:active:${driverId}`;
-    const cached = await this.redis.get(key);
+    const cached = await this.redis.get(key).catch(() => null);
     if (cached !== null) return cached === '1';
     const active = await this.subscriptionService.isActive(driverId);
-    await this.redis.set(
-      key,
-      active ? '1' : '0',
-      'EX',
-      this.subActiveCacheSeconds,
-    );
+    await this.redis
+      .set(key, active ? '1' : '0', 'EX', this.subActiveCacheSeconds)
+      .catch(() => undefined);
     return active;
   }
 
@@ -125,10 +130,7 @@ export class LocationController {
     @CurrentUser() user: { userId: string },
     @Body() body: UpdateLocationDto,
   ) {
-    const profile = await this.driverProfiles.findOne({
-      where: { userId: user.userId },
-    });
-    const status = profile?.status ?? DriverStatus.OFFLINE;
+    const status = await this.getDriverStatusCached(user.userId);
 
     // The subscription gate only matters for ONLINE drivers; ON_TRIP/RESERVED
     // are always tracked and everyone else is removed from geo regardless. So
@@ -181,21 +183,21 @@ export class LocationController {
       }
     }
 
-    if (geoAccepted && status === DriverStatus.ON_TRIP) {
-      void this.broadcastAssignedLocation(user.userId, body, ping);
+    if (
+      ping?.accepted !== false &&
+      [DriverStatus.ON_TRIP, DriverStatus.RESERVED].includes(status)
+    ) {
+      // Metering must commit before HTTP acknowledgement, even if geo/Redis is unavailable.
+      await this.broadcastAssignedLocation(user.userId, body, ping);
     }
 
     // Batch-flush to Postgres for history (never every ping). Skip rejected
     // jumps so forensic history matches what dispatch and the rider map saw.
     if (ping?.accepted !== false) {
       const throttleKey = `driver:loc:flush:${user.userId}`;
-      const acquired = await this.redis.set(
-        throttleKey,
-        '1',
-        'EX',
-        this.historyFlushSeconds,
-        'NX',
-      );
+      const acquired = await this.redis
+        .set(throttleKey, '1', 'EX', this.historyFlushSeconds, 'NX')
+        .catch(() => null);
       if (acquired === 'OK') {
         try {
           await this.history.save(
@@ -226,18 +228,14 @@ export class LocationController {
     ping: GeoPingResult | null,
   ): Promise<void> {
     try {
-      let track = parseLiveTrack(await this.redis.get(liveTrackKey(driverId)));
-      if (!track || !track.pickup || !track.dropoff) {
-        const ride = await this.rides.findOne({
-          where: { driverId, status: In(TRACKABLE_RIDE_STATUSES) },
-          order: { matchedAt: 'DESC' },
-        });
-        if (!ride) return;
-        track = liveTrackFromRide(ride);
-        await writeLiveTrack(this.redis, driverId, track);
-      } else {
-        await this.redis.expire(liveTrackKey(driverId), LIVE_TRACK_TTL_SEC);
-      }
+      // A stale cache must never send a new trip's GPS to a former rider.
+      const ride = await this.rides.findOne({
+        where: { driverId, status: In(TRACKABLE_RIDE_STATUSES) },
+        order: { matchedAt: 'DESC' },
+      });
+      if (!ride) return;
+      const track = liveTrackFromRide(ride);
+      await writeLiveTrack(this.redis, driverId, track).catch(() => undefined);
 
       const lat = ping?.lat ?? body.lat;
       const lng = ping?.lng ?? body.lng;
@@ -268,30 +266,46 @@ export class LocationController {
               accuracy: ping?.accuracy ?? body.accuracy ?? null,
             },
           );
+          if (!recResult.accepted) return;
           totalTraveledM = recResult.totalDistanceM;
         } catch (recErr) {
-          this.logger.warn(`Route recording failed for ride ${track.rideId}: ${recErr}`);
+          this.logger.warn(
+            `Route recording failed for ride ${track.rideId}: ${recErr}`,
+          );
+          throw new ServiceUnavailableException(
+            'Trip metering unavailable — retry the location update',
+          );
         }
       }
 
-      await this.notifications.notify(track.riderId, 'ride.driver_location', {
-        rideId: track.rideId,
-        driverId,
-        lat,
-        lng,
-        heading: ping?.heading ?? body.heading ?? null,
-        speed: ping?.speed ?? body.speed ?? null,
-        accuracy: ping?.accuracy ?? body.accuracy ?? null,
-        timestampMs,
-        seq: timestampMs,
-        actualDistanceM: totalTraveledM,
-        remainingMetres: eta?.remainingMetres ?? null,
-        etaSeconds: eta?.etaSeconds ?? null,
-        etaTarget: eta?.target ?? null,
-      });
+      await this.notifications
+        .notify(track.riderId, 'ride.driver_location', {
+          rideId: track.rideId,
+          driverId,
+          lat,
+          lng,
+          heading: ping?.heading ?? body.heading ?? null,
+          speed: ping?.speed ?? body.speed ?? null,
+          accuracy: ping?.accuracy ?? body.accuracy ?? null,
+          timestampMs,
+          seq: timestampMs,
+          actualDistanceM: totalTraveledM,
+          remainingMetres: eta?.remainingMetres ?? null,
+          etaSeconds: eta?.etaSeconds ?? null,
+          etaTarget: eta?.target ?? null,
+        })
+        .catch(() =>
+          this.logger.warn(
+            'Location notification unavailable; metering committed',
+          ),
+        );
     } catch (error) {
+      if (error instanceof ServiceUnavailableException) throw error;
       this.logger.warn(
-        `driver location push failed: ${(error as Error).message}`,
+        `driver location persistence failed: ${(error as Error).message}`,
+      );
+      throw new ServiceUnavailableException(
+        'Trip location unavailable — retry the update',
       );
     }
   }
@@ -419,12 +433,23 @@ export class LocationController {
       take: 20, // get a few to filter out duplicates
     });
 
-    const uniqueDestinations: { title: string; subtitle: string; lat: number; lng: number }[] = [];
+    const uniqueDestinations: {
+      title: string;
+      subtitle: string;
+      lat: number;
+      lng: number;
+    }[] = [];
     const seen = new Set<string>();
 
     for (const ride of rides) {
-      if (!ride.dropoffAddress || !ride.dropoff || !ride.dropoff.lat || !ride.dropoff.lng) continue;
-      
+      if (
+        !ride.dropoffAddress ||
+        !ride.dropoff ||
+        !ride.dropoff.lat ||
+        !ride.dropoff.lng
+      )
+        continue;
+
       const parts = ride.dropoffAddress.split(',').map((p) => p.trim());
       const title = parts[0] || ride.dropoffAddress;
       const subtitle = parts.slice(1).join(', ') || 'Addis Ababa';

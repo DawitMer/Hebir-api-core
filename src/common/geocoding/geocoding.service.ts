@@ -333,7 +333,9 @@ export class GeocodingService {
     return `${distanceLabel} ${bearing} of ${place.name}, ${suffix}`;
   }
 
-  async autocompletePlaces(query: string): Promise<{ placeId: string; title: string; subtitle: string }[]> {
+  async autocompletePlaces(
+    query: string,
+  ): Promise<{ placeId: string; title: string; subtitle: string }[]> {
     if (!this.googleApiKey || !this.onlineEnabled || !query.trim()) return [];
 
     try {
@@ -359,7 +361,9 @@ export class GeocodingService {
         subtitle: p.structured_formatting?.secondary_text ?? '',
       }));
     } catch (error) {
-      this.logger.warn(`Places autocomplete failed: ${(error as Error).message}`);
+      this.logger.warn(
+        `Places autocomplete failed: ${(error as Error).message}`,
+      );
       return [];
     }
   }

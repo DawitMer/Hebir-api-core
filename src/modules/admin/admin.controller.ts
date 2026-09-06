@@ -13,6 +13,7 @@ import { ConfigService } from '@nestjs/config';
 import { IsBoolean, IsOptional, IsString } from 'class-validator';
 import { AdminService } from './admin.service';
 import { RidesService } from '../rides/rides.service';
+import { ListRideMessagesDto } from '../rides/dto/list-ride-messages.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -84,8 +85,11 @@ export class AdminController {
   }
 
   @Get('rides/:id/messages')
-  rideChat(@Param('id', ParseUUIDPipe) id: string) {
-    return this.rides.listRideMessagesForStaff(id);
+  rideChat(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: ListRideMessagesDto,
+  ) {
+    return this.rides.listRideMessagesForStaff(id, query);
   }
 
   @Get('operations/live')

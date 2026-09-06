@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   GetObjectCommand,
+  HeadObjectCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -81,10 +82,8 @@ export class KycStorageService {
       `http://127.0.0.1:${this.config.get<number>('PORT') ?? 3000}`
     ).replace(/\/$/, '');
     this.localRoot = path.resolve(
-      process.cwd(),
-      '..',
-      '.local-data',
-      'kyc-uploads',
+      this.config.get<string>('KYC_LOCAL_ROOT') ??
+        path.join(process.cwd(), '..', '.local-data', 'kyc-uploads'),
     );
   }
 
@@ -116,13 +115,15 @@ export class KycStorageService {
         Bucket: this.bucket,
         Key: params.storageKey,
         ContentType: params.contentType,
+        IfNoneMatch: '*',
       });
       const uploadUrl = await getSignedUrl(this.s3, command, {
         expiresIn: expires,
+        signableHeaders: new Set(['if-none-match', 'content-type']),
       });
       return {
         uploadUrl,
-        headers: { 'Content-Type': params.contentType },
+        headers: { 'Content-Type': params.contentType, 'If-None-Match': '*' },
       };
     }
 
@@ -190,6 +191,34 @@ export class KycStorageService {
     await this.redis.del(`kyc:upload:${storageKey}`);
   }
 
+  /** A presign is not proof that a non-empty, bounded object was uploaded. */
+  async assertUploadedObject(storageKey: string): Promise<void> {
+    const maxBytes = 15 * 1024 * 1024;
+    if (this.mode === 's3' && this.s3) {
+      const object = await this.s3.send(
+        new HeadObjectCommand({ Bucket: this.bucket, Key: storageKey }),
+        {
+          abortSignal: AbortSignal.timeout(10000),
+        },
+      );
+      if (
+        !object.ContentLength ||
+        object.ContentLength > maxBytes ||
+        !/^(image\/(jpeg|jpg|png|webp)|application\/pdf)$/.test(
+          object.ContentType ?? '',
+        )
+      ) {
+        throw new Error(
+          'Uploaded object is empty, too large or has an unsupported type',
+        );
+      }
+    } else {
+      const stat = await fs.stat(this.resolveLocalPath(storageKey));
+      if (!stat.isFile() || stat.size <= 0 || stat.size > maxBytes)
+        throw new Error('Invalid uploaded file size');
+    }
+  }
+
   async saveLocalBody(storageKey: string, body: Buffer, driverId: string) {
     const owner = await this.redis.get(`kyc:upload:${storageKey}`);
     if (owner !== driverId) {
@@ -197,7 +226,15 @@ export class KycStorageService {
     }
     const full = this.resolveLocalPath(storageKey);
     await fs.mkdir(path.dirname(full), { recursive: true });
-    await fs.writeFile(full, body);
+    try {
+      await fs.writeFile(full, body, { flag: 'wx' });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      // Uncertain retry of identical bytes is safe; an existing object is immutable.
+      const existing = await fs.readFile(full);
+      if (!existing.equals(body))
+        throw new Error('Upload key already contains a different document');
+    }
   }
 
   async readLocalBody(storageKey: string): Promise<Buffer | null> {

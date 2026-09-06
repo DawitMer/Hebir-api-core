@@ -1,3 +1,13 @@
+import { FareService } from '../fare/fare.service';
+
+function testFareService() {
+  return new FareService(
+    { get: () => undefined } as never,
+    { get: () => undefined } as never,
+    { enabled: false } as never,
+  );
+}
+
 import {
   ConflictException,
   ForbiddenException,
@@ -88,7 +98,7 @@ describe('RidesService.acceptOffer race', () => {
       driverProfiles as never,
       { find: jest.fn() } as never,
       { find: jest.fn() } as never,
-      { get: jest.fn() } as never,
+      testFareService(),
       { mayAccessMarketplace: jest.fn().mockResolvedValue(true) } as never,
       kyc as never,
       notifications as never,
@@ -101,7 +111,7 @@ describe('RidesService.acceptOffer race', () => {
       {
         getAccumulatedDistance: jest.fn().mockResolvedValue(0),
         getSimplifiedRoute: jest.fn().mockResolvedValue([]),
-        startTripRecording: jest.fn(),
+        startRecording: jest.fn().mockResolvedValue(undefined),
       } as never,
     );
 
@@ -252,7 +262,7 @@ describe('RidesService.transitionStatus geofence', () => {
         { update: jest.fn(), find: jest.fn() } as never,
         { find: jest.fn() } as never,
         { find: jest.fn() } as never,
-        {} as never,
+        testFareService(),
         {} as never,
         { mapDriverPhotoUrls: jest.fn() } as never,
         { notify: jest.fn() } as never,
@@ -262,11 +272,11 @@ describe('RidesService.transitionStatus geofence', () => {
         redis as never,
         { clearState: jest.fn() } as never,
         { settleFare: jest.fn() } as never,
-      {
-        getAccumulatedDistance: jest.fn().mockResolvedValue(0),
-        getSimplifiedRoute: jest.fn().mockResolvedValue([]),
-        startTripRecording: jest.fn(),
-      } as never,
+        {
+          getAccumulatedDistance: jest.fn().mockResolvedValue(0),
+          getSimplifiedRoute: jest.fn().mockResolvedValue([]),
+          startRecording: jest.fn().mockResolvedValue(undefined),
+        } as never,
       );
       return { service, rides: inner, locationSvc };
     })();
@@ -315,7 +325,7 @@ describe('RidesService.transitionStatus geofence', () => {
       { update: jest.fn(), find: jest.fn() } as never,
       { find: jest.fn() } as never,
       { find: jest.fn() } as never,
-      { get: jest.fn() } as never,
+      testFareService(),
       { mayAccessMarketplace: jest.fn().mockResolvedValue(true) } as never,
       { mapDriverPhotoUrls: jest.fn() } as never,
       { notify: jest.fn() } as never,
@@ -328,7 +338,7 @@ describe('RidesService.transitionStatus geofence', () => {
       {
         getAccumulatedDistance: jest.fn().mockResolvedValue(0),
         getSimplifiedRoute: jest.fn().mockResolvedValue([]),
-        startTripRecording: jest.fn(),
+        startRecording: jest.fn().mockResolvedValue(undefined),
       } as never,
     );
 
@@ -394,7 +404,7 @@ describe('RidesService.cancelRide rematch', () => {
       } as never,
       { find: jest.fn() } as never,
       { find: jest.fn() } as never,
-      {} as never,
+      testFareService(),
       { mayAccessMarketplace: jest.fn().mockResolvedValue(true) } as never,
       { mapDriverPhotoUrls: jest.fn() } as never,
       notifications as never,
@@ -412,7 +422,7 @@ describe('RidesService.cancelRide rematch', () => {
       {
         getAccumulatedDistance: jest.fn().mockResolvedValue(0),
         getSimplifiedRoute: jest.fn().mockResolvedValue([]),
-        startTripRecording: jest.fn(),
+        startRecording: jest.fn().mockResolvedValue(undefined),
       } as never,
     );
     return { service, rides, ride, dispatchQueue, notifications, redis };
@@ -518,7 +528,7 @@ describe('RidesService authorization and start-code gate', () => {
       } as never,
       { find: jest.fn() } as never,
       { find: jest.fn() } as never,
-      {} as never,
+      testFareService(),
       { mayAccessMarketplace: jest.fn().mockResolvedValue(true) } as never,
       kyc as never,
       { notify: jest.fn() } as never,
@@ -536,7 +546,7 @@ describe('RidesService authorization and start-code gate', () => {
       {
         getAccumulatedDistance: jest.fn().mockResolvedValue(0),
         getSimplifiedRoute: jest.fn().mockResolvedValue([]),
-        startTripRecording: jest.fn(),
+        startRecording: jest.fn().mockResolvedValue(undefined),
       } as never,
     );
     return { service, rides, ride, redis };

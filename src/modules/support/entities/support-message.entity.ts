@@ -14,6 +14,11 @@ export enum SupportSenderRole {
 
 @Entity('support_messages')
 @Index('IDX_support_messages_thread_created', ['threadId', 'createdAt'])
+@Index(
+  'UQ_support_messages_client',
+  ['threadId', 'senderId', 'clientMessageId'],
+  { unique: true },
+)
 export class SupportMessage {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -23,6 +28,9 @@ export class SupportMessage {
 
   @Column({ type: 'uuid' })
   senderId: string;
+
+  @Column({ type: 'uuid', nullable: true })
+  clientMessageId: string | null;
 
   @Column({ type: 'varchar', length: 20 })
   senderRole: SupportSenderRole;

@@ -1,3 +1,13 @@
+import { FareService } from '../fare/fare.service';
+
+function testFareService() {
+  return new FareService(
+    { get: () => undefined } as never,
+    { get: () => undefined } as never,
+    { enabled: false } as never,
+  );
+}
+
 import { ConflictException } from '@nestjs/common';
 import { RidesService } from './rides.service';
 import { Ride, RideStatus } from './entities/ride.entity';
@@ -124,7 +134,7 @@ describe('RidesService & Dispatch Concurrency Suite', () => {
       driverProfiles as never,
       { find: jest.fn().mockResolvedValue([]) } as never,
       { find: jest.fn().mockResolvedValue([]) } as never,
-      { get: jest.fn() } as never,
+      testFareService(),
       { mayAccessMarketplace: jest.fn().mockResolvedValue(true) } as never,
       kyc as never,
       notifications as never,
@@ -137,7 +147,7 @@ describe('RidesService & Dispatch Concurrency Suite', () => {
       {
         getAccumulatedDistance: jest.fn().mockResolvedValue(0),
         getSimplifiedRoute: jest.fn().mockResolvedValue([]),
-        startTripRecording: jest.fn(),
+        startRecording: jest.fn().mockResolvedValue(undefined),
       } as never,
     );
 

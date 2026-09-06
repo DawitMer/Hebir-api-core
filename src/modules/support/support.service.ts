@@ -1,11 +1,12 @@
 import {
-  ForbiddenException,
+  BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, QueryFailedError, Repository } from 'typeorm';
 import {
   SupportThread,
   SupportThreadStatus,
@@ -16,6 +17,8 @@ import {
 } from './entities/support-message.entity';
 import { UserAccount, UserRole } from '../auth/entities/user-account.entity';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
+
+import { ListRideMessagesDto } from '../rides/dto/list-ride-messages.dto';
 
 @Injectable()
 export class SupportService {
@@ -31,37 +34,53 @@ export class SupportService {
     private readonly notifications: NotificationsGateway,
   ) {}
 
-  async getOrCreateMine(userId: string, roles: string[]) {
+  async getOrCreateMine(
+    userId: string,
+    roles: string[],
+    query: ListRideMessagesDto = {},
+  ) {
     const userRole = roles.includes(UserRole.DRIVER) ? 'driver' : 'rider';
-    let thread = await this.threads.findOne({
-      where: { userId, status: SupportThreadStatus.OPEN },
-      order: { lastMessageAt: 'DESC' },
-    });
-    if (!thread) {
-      const now = new Date();
-      thread = await this.threads.save(
-        this.threads.create({
+    const thread = await this.threads.manager.transaction(async (em) => {
+      const user = await em.findOne(UserAccount, {
+        where: { id: userId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!user) throw new NotFoundException('Account not found');
+      // Keep closed history visible. A new user message reopens this same thread.
+      const existing = await em.findOne(SupportThread, {
+        where: { userId },
+        order: { lastMessageAt: 'DESC' },
+      });
+      if (existing) return existing;
+      const created = await em.save(
+        em.create(SupportThread, {
           userId,
           userRole,
           status: SupportThreadStatus.OPEN,
           assignedAgentId: null,
-          lastMessageAt: now,
+          lastMessageAt: new Date(),
         }),
       );
-      await this.messages.save(
-        this.messages.create({
-          threadId: thread.id,
+      await em.save(
+        em.create(SupportMessage, {
+          threadId: created.id,
           senderId: userId,
           senderRole: SupportSenderRole.SYSTEM,
           senderName: 'ህብር Support',
           body: 'A support agent will reply here. This conversation is saved so any agent can pick it up.',
         }),
       );
-    }
-    return this.threadPayload(thread);
+      return created;
+    });
+    return this.threadPayload(thread, query);
   }
 
-  async postUserMessage(userId: string, roles: string[], body: string) {
+  async postUserMessage(
+    userId: string,
+    roles: string[],
+    body: string,
+    clientMessageId?: string,
+  ) {
     const { thread } = await this.getOrCreateMine(userId, roles);
     const user = await this.users.findOne({ where: { id: userId } });
     return this.appendMessage({
@@ -70,7 +89,8 @@ export class SupportService {
       senderRole: SupportSenderRole.USER,
       senderName: user?.fullName || user?.phoneNumber || 'Customer',
       body,
-      notifyUserId: null,
+      notifyUserId: userId,
+      clientMessageId,
     });
   }
 
@@ -109,23 +129,21 @@ export class SupportService {
     });
   }
 
-  async getThreadForStaff(threadId: string) {
+  async getThreadForStaff(threadId: string, query: ListRideMessagesDto = {}) {
     const thread = await this.threads.findOne({ where: { id: threadId } });
     if (!thread) throw new NotFoundException('Support thread not found');
-    return this.threadPayload(thread);
+    return this.threadPayload(thread, query);
   }
 
-  async postAgentMessage(threadId: string, agentId: string, body: string) {
+  async postAgentMessage(
+    threadId: string,
+    agentId: string,
+    body: string,
+    clientMessageId?: string,
+  ) {
     const thread = await this.threads.findOne({ where: { id: threadId } });
     if (!thread) throw new NotFoundException('Support thread not found');
     const agent = await this.users.findOne({ where: { id: agentId } });
-    if (thread.status === SupportThreadStatus.CLOSED) {
-      thread.status = SupportThreadStatus.OPEN;
-    }
-    if (!thread.assignedAgentId) {
-      thread.assignedAgentId = agentId;
-    }
-    await this.threads.save(thread);
     return this.appendMessage({
       threadId,
       senderId: agentId,
@@ -133,6 +151,7 @@ export class SupportService {
       senderName: agent?.fullName || agent?.phoneNumber || 'Support agent',
       body,
       notifyUserId: thread.userId,
+      clientMessageId,
     });
   }
 
@@ -141,13 +160,16 @@ export class SupportService {
     agentId: string,
     patch: { status?: 'open' | 'closed' },
   ) {
-    const thread = await this.threads.findOne({ where: { id: threadId } });
-    if (!thread) throw new NotFoundException('Support thread not found');
-    if (patch.status) {
-      thread.status = patch.status as SupportThreadStatus;
-    }
-    thread.assignedAgentId = agentId;
-    await this.threads.save(thread);
+    const thread = await this.threads.manager.transaction(async (em) => {
+      const current = await em.findOne(SupportThread, {
+        where: { id: threadId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!current) throw new NotFoundException('Support thread not found');
+      if (patch.status) current.status = patch.status as SupportThreadStatus;
+      current.assignedAgentId = agentId;
+      return em.save(current);
+    });
     return this.threadPayload(thread);
   }
 
@@ -158,21 +180,58 @@ export class SupportService {
     senderName: string;
     body: string;
     notifyUserId: string | null;
+    clientMessageId?: string;
   }) {
     const trimmed = input.body.trim();
-    if (!trimmed) throw new ForbiddenException('Message body is required');
-    const message = await this.messages.save(
-      this.messages.create({
-        threadId: input.threadId,
-        senderId: input.senderId,
-        senderRole: input.senderRole,
-        senderName: input.senderName.slice(0, 120),
-        body: trimmed.slice(0, 2000),
-      }),
-    );
-    await this.threads.update(input.threadId, {
-      lastMessageAt: message.createdAt,
-    });
+    if (!trimmed || trimmed.length > 2000)
+      throw new BadRequestException('Use 1–2000 characters');
+    let message: SupportMessage;
+    try {
+      message = await this.messages.manager.transaction(async (em) => {
+        const thread = await em.findOne(SupportThread, {
+          where: { id: input.threadId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!thread) throw new NotFoundException('Support thread not found');
+        const saved = await em.save(
+          em.create(SupportMessage, {
+            threadId: input.threadId,
+            senderId: input.senderId,
+            senderRole: input.senderRole,
+            senderName: input.senderName.slice(0, 120),
+            body: trimmed,
+            clientMessageId: input.clientMessageId ?? null,
+          }),
+        );
+        await em.update(SupportThread, thread.id, {
+          lastMessageAt: saved.createdAt,
+          status: SupportThreadStatus.OPEN,
+          assignedAgentId:
+            thread.assignedAgentId ??
+            (input.senderRole === SupportSenderRole.AGENT
+              ? input.senderId
+              : null),
+        });
+        return saved;
+      });
+    } catch (error) {
+      if (
+        !(error instanceof QueryFailedError) ||
+        (error.driverError as { code?: string }).code !== '23505' ||
+        !input.clientMessageId
+      )
+        throw error;
+      const saved = await this.messages.findOne({
+        where: {
+          threadId: input.threadId,
+          senderId: input.senderId,
+          clientMessageId: input.clientMessageId,
+        },
+      });
+      if (!saved || saved.body !== trimmed)
+        throw new ConflictException('Message id already used');
+      return this.mapMessage(saved);
+    }
     if (input.notifyUserId) {
       try {
         await this.notifications.notify(
@@ -190,13 +249,34 @@ export class SupportService {
     return this.mapMessage(message);
   }
 
-  private async threadPayload(thread: SupportThread) {
+  private async threadPayload(
+    thread: SupportThread,
+    query: ListRideMessagesDto = {},
+  ) {
     const user = await this.users.findOne({ where: { id: thread.userId } });
-    const messages = await this.messages.find({
-      where: { threadId: thread.id },
-      order: { createdAt: 'ASC' },
-      take: 500,
-    });
+    const limit = Math.max(1, Math.min(100, query.limit ?? 50));
+    const builder = this.messages
+      .createQueryBuilder('m')
+      .where('m.threadId = :threadId', { threadId: thread.id });
+    if (query.before) {
+      const cursor = await this.messages.findOne({
+        where: { id: query.before, threadId: thread.id },
+      });
+      if (!cursor) throw new BadRequestException('Invalid message cursor');
+      builder.andWhere(
+        '(m."createdAt", m.id) < (SELECT "createdAt", id FROM support_messages WHERE id = :before)',
+        { before: query.before },
+      );
+    }
+    const rows = await builder
+      .orderBy('m.createdAt', 'DESC')
+      .addOrderBy('m.id', 'DESC')
+      .take(limit + 1)
+      .getMany();
+    const messages = rows.slice(0, limit);
+    const nextCursor =
+      rows.length > limit ? messages[messages.length - 1].id : null;
+    messages.reverse();
     return {
       thread: {
         id: thread.id,
@@ -210,6 +290,7 @@ export class SupportService {
         createdAt: thread.createdAt,
       },
       messages: messages.map((m) => this.mapMessage(m)),
+      nextCursor,
     };
   }
 
@@ -218,6 +299,8 @@ export class SupportService {
       id: message.id,
       threadId: message.threadId,
       senderId: message.senderId,
+      clientMessageId: message.clientMessageId,
+      status: 'sent',
       senderRole: message.senderRole,
       senderName: message.senderName,
       body: message.body,

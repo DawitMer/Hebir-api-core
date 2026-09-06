@@ -35,6 +35,10 @@ async function login(phoneNumber: string, roles: Array<'rider' | 'driver'>) {
 const auth = (token: string) => ({
   headers: { Authorization: `Bearer ${token}` },
 });
+const locAuth = () => {
+  const token = process.env.LOCATION_SVC_TOKEN;
+  return token ? { headers: { Authorization: `Bearer ${token}` } } : {};
+};
 
 async function main() {
   const driver = await login(DRIVER_PHONE, ['driver']);
@@ -46,7 +50,7 @@ async function main() {
   await axios
     .post(`${API}/subscription/dev-activate`, {}, auth(driver.token))
     .catch(() => undefined);
-  await axios.post(`${LOC}/drivers/offline`, { driverId: driver.userId }).catch(() => undefined);
+  await axios.post(`${LOC}/drivers/offline`, { driverId: driver.userId }, locAuth()).catch(() => undefined);
   await axios.post(
     `${API}/drivers/location`,
     { lat: DRIVER_AT.lat, lng: DRIVER_AT.lng },
@@ -55,7 +59,7 @@ async function main() {
   await axios.post(`${LOC}/drivers/location`, {
     driverId: driver.userId,
     location: DRIVER_AT,
-  });
+  }, locAuth());
   await axios.post(`${API}/drivers/presence`, { online: true }, auth(driver.token));
   console.log('driver online + located');
 
@@ -65,12 +69,12 @@ async function main() {
       await axios.post(`${LOC}/drivers/location`, {
         driverId: driver.userId,
         location: activeRide.data.dropoff || DROPOFF,
-      }).catch(() => undefined);
+      }, locAuth()).catch(() => undefined);
       await axios.post(`${API}/rides/${activeRide.data.id}/complete`, {}, auth(driver.token)).catch(() => undefined);
       await axios.post(`${LOC}/drivers/location`, {
         driverId: driver.userId,
         location: DRIVER_AT,
-      }).catch(() => undefined);
+      }, locAuth()).catch(() => undefined);
     } else {
       await axios.patch(`${API}/rides/${activeRide.data.id}/status`, { status: 'cancelled' }, auth(rider.token)).catch(() => undefined);
     }
@@ -120,11 +124,11 @@ async function main() {
     console.log(`transition -> ${data.status}`);
   }
 
-  await axios.post(`${LOC}/drivers/offline`, { driverId: driver.userId });
+  await axios.post(`${LOC}/drivers/offline`, { driverId: driver.userId }, locAuth());
   await axios.post(`${LOC}/drivers/location`, {
     driverId: driver.userId,
     location: DROPOFF,
-  });
+  }, locAuth());
 
   const { data: done } = await axios.post(
     `${API}/rides/${ride.id}/complete`,

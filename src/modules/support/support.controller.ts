@@ -10,6 +10,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { SupportService } from './support.service';
+import { ListRideMessagesDto } from '../rides/dto/list-ride-messages.dto';
 import {
   SendSupportMessageDto,
   UpdateSupportThreadDto,
@@ -32,8 +33,11 @@ export class SupportController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.RIDER, UserRole.DRIVER)
   @Get('threads/mine')
-  mine(@CurrentUser() user: { userId: string; roles: string[] }) {
-    return this.support.getOrCreateMine(user.userId, user.roles ?? []);
+  mine(
+    @CurrentUser() user: { userId: string; roles: string[] },
+    @Query() query: ListRideMessagesDto,
+  ) {
+    return this.support.getOrCreateMine(user.userId, user.roles ?? [], query);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)
@@ -48,6 +52,7 @@ export class SupportController {
       user.userId,
       user.roles ?? [],
       dto.body,
+      dto.clientMessageId,
     );
   }
 }
@@ -64,8 +69,11 @@ export class AdminSupportController {
   }
 
   @Get('threads/:id')
-  get(@Param('id', ParseUUIDPipe) id: string) {
-    return this.support.getThreadForStaff(id);
+  get(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: ListRideMessagesDto,
+  ) {
+    return this.support.getThreadForStaff(id, query);
   }
 
   @UseGuards(RedisRateLimitGuard)
@@ -76,7 +84,12 @@ export class AdminSupportController {
     @CurrentUser() user: { userId: string },
     @Body() dto: SendSupportMessageDto,
   ) {
-    return this.support.postAgentMessage(id, user.userId, dto.body);
+    return this.support.postAgentMessage(
+      id,
+      user.userId,
+      dto.body,
+      dto.clientMessageId,
+    );
   }
 
   @Patch('threads/:id')

@@ -4,9 +4,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Adds persistent actual traveled distance, duration, recorded route coordinates,
  * final authoritative fare, fare breakdown snapshot, and pricing version to rides.
  */
-export class AddActualRouteAndFareToRides1786563000000
-  implements MigrationInterface
-{
+export class AddActualRouteAndFareToRides1786563000000 implements MigrationInterface {
   name = 'AddActualRouteAndFareToRides1786563000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

@@ -53,9 +53,21 @@ export async function writeLiveTrack(
 export async function clearLiveTrack(
   redis: Redis,
   driverId: string | null | undefined,
+  rideId: string,
 ): Promise<void> {
   if (!driverId) return;
-  await redis.del(liveTrackKey(driverId));
+  await redis.eval(
+    `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw then return 0 end
+    local ok, value = pcall(cjson.decode, raw)
+    if ok and value.rideId == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+    return 0
+  `,
+    1,
+    liveTrackKey(driverId),
+    rideId,
+  );
 }
 
 export function parseLiveTrack(raw: string | null): RideLiveTrack | null {

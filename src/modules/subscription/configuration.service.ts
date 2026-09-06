@@ -1,15 +1,12 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import {
   CONFIG_DEFAULTS,
   Configuration,
 } from './entities/configuration.entity';
-import {
-  FARE_RATE_DEFAULTS,
-  FareRateKeys,
-  LEGACY_FARE_RATE_DEFAULTS,
-} from '../fare/fare-rates';
+import { FARE_RATE_DEFAULTS, FareRateKeys } from '../fare/fare-rates';
 
 /**
  * Single source of truth for operational parameters (blueprint section 10).
@@ -18,6 +15,7 @@ import {
  */
 @Injectable()
 export class ConfigurationService implements OnModuleInit {
+  private readonly logger = new Logger(ConfigurationService.name);
   private cache = new Map<string, unknown>();
 
   constructor(
@@ -26,9 +24,13 @@ export class ConfigurationService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    await this.seedDefaults();
-    await this.migrateLegacyFareKeys();
-    await this.migrateUnrealisticFareDefaults();
+    await this.repo.manager.transaction(async (em) => {
+      // Serializes first boot across API replicas. Never reprice existing rows.
+      await em.query('SELECT pg_advisory_xact_lock(1788456400)');
+      const scoped = new ConfigurationService(em.getRepository(Configuration));
+      await scoped.migrateLegacyFareKeys();
+      await scoped.seedDefaults();
+    });
     await this.refreshCache();
   }
 
@@ -96,54 +98,14 @@ export class ConfigurationService implements OnModuleInit {
     }
   }
 
-  /**
-   * First-boot seeded the 20 ETB / 8 ETB/km demo rates. If ops never changed
-   * the bundle, lift it to Addis-realistic defaults. Custom PATCH /fare/rates
-   * values are left alone.
-   */
-  private async migrateUnrealisticFareDefaults() {
-    const pairs: Array<[string, number]> = [
-      [
-        FareRateKeys.initialFeeEtb,
-        LEGACY_FARE_RATE_DEFAULTS[FareRateKeys.initialFeeEtb],
-      ],
-      [
-        FareRateKeys.perMeterEtb,
-        LEGACY_FARE_RATE_DEFAULTS[FareRateKeys.perMeterEtb],
-      ],
-      [
-        FareRateKeys.perMinuteEtb,
-        LEGACY_FARE_RATE_DEFAULTS[FareRateKeys.perMinuteEtb],
-      ],
-      [
-        FareRateKeys.minimumEtb,
-        LEGACY_FARE_RATE_DEFAULTS[FareRateKeys.minimumEtb],
-      ],
-    ];
-    const rows = await Promise.all(
-      pairs.map(([key]) => this.repo.findOne({ where: { key } })),
-    );
-    const stillLegacy = pairs.every(([, oldValue], i) => {
-      const n = Number(rows[i]?.value);
-      return Number.isFinite(n) && n === oldValue;
-    });
-    if (!stillLegacy) return;
-
-    const updates: Array<[string, number]> = [
-      ...pairs.map(
-        ([key]) =>
-          [key, FARE_RATE_DEFAULTS[key as keyof typeof FARE_RATE_DEFAULTS]] as [
-            string,
-            number,
-          ],
-      ),
-      [
-        FareRateKeys.perWaitMinuteEtb,
-        FARE_RATE_DEFAULTS[FareRateKeys.perWaitMinuteEtb],
-      ],
-    ];
-    for (const [key, next] of updates) {
-      await this.set(key, next, 'Addis-realistic fare default (auto-migrated)');
+  @Interval(30000)
+  async refreshReplicaCache() {
+    try {
+      await this.refreshCache();
+    } catch {
+      this.logger.warn(
+        'Configuration refresh failed; retaining last complete snapshot',
+      );
     }
   }
 
@@ -163,14 +125,19 @@ export class ConfigurationService implements OnModuleInit {
   }
 
   async set(key: string, value: unknown, description?: string) {
-    const existing = await this.repo.findOne({ where: { key } });
-    if (existing) {
-      existing.value = value;
-      if (description) existing.description = description;
-      await this.repo.save(existing);
-    } else {
-      await this.repo.save(this.repo.create({ key, value, description }));
-    }
+    await this.setMany([{ key, value, description }]);
+  }
+
+  async setMany(
+    updates: Array<{ key: string; value: unknown; description?: string }>,
+  ) {
+    if (!updates.length) return;
+    await this.repo.manager.transaction(async (em) => {
+      await em.query('SELECT pg_advisory_xact_lock(1788456400)');
+      for (const update of updates) {
+        await em.getRepository(Configuration).upsert(update, ['key']);
+      }
+    });
     await this.refreshCache();
   }
 

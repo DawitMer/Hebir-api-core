@@ -69,7 +69,9 @@ export class NotificationsGateway
       try {
         const { userId, event, payload } = JSON.parse(message);
         if (typeof userId === 'string' && typeof event === 'string') {
-          this.emitToUser(userId, event, payload);
+          void this.emitToUser(userId, event, payload).catch((error: Error) => {
+            this.logger.warn(`Notification delivery denied: ${error.message}`);
+          });
         }
       } catch (error) {
         this.logger.warn(`Dropped malformed notification: ${error.message}`);
@@ -170,11 +172,21 @@ export class NotificationsGateway
     return null;
   }
 
-  private emitToUser(userId: string, event: string, payload: unknown) {
+  private async emitToUser(userId: string, event: string, payload: unknown) {
     const sockets = this.userSockets.get(userId);
     if (!sockets) return;
     for (const socketId of sockets) {
-      this.server.to(socketId).emit(event, payload);
+      const socket = this.server.sockets.sockets.get(socketId) as
+        SocketWithUser | undefined;
+      if (!socket) continue;
+      // Re-check JWT expiry, denylist and account standing before every delivery.
+      // getAuthContext uses the same bounded 15-second cache as HTTP guards.
+      if ((await this.resolveUserId(socket)) !== userId) {
+        socket.disconnect(true);
+        this.handleDisconnect(socket);
+        continue;
+      }
+      socket.emit(event, payload);
     }
   }
 

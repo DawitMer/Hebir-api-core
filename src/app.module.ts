@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
-import { randomUUID } from 'crypto';
 import { validate } from './config/env.validation';
 import { DatabaseModule } from './database/database.module';
 import { RedisModule } from './redis/redis.module';
@@ -24,7 +23,10 @@ import { AdminModule } from './modules/admin/admin.module';
 import { IncidentsModule } from './modules/incidents/incidents.module';
 import { SupportModule } from './modules/support/support.module';
 import { HealthController } from './modules/admin/health.controller';
-import { getRequestId } from './observability/request-context';
+import {
+  getRequestId,
+  resolveOrCreateRequestId,
+} from './observability/request-context';
 import { LocationSvcModule } from './common/location-svc/location-svc.module';
 import { GeocodingModule } from './common/geocoding/geocoding.module';
 
@@ -49,10 +51,7 @@ import { GeocodingModule } from './common/geocoding/geocoding.module';
             level,
             genReqId: (req, res) => {
               const header = req.headers['x-request-id'];
-              const id =
-                typeof header === 'string' && header.trim()
-                  ? header.trim()
-                  : randomUUID();
+              const id = resolveOrCreateRequestId(header);
               res.setHeader('x-request-id', id);
               return id;
             },
@@ -76,7 +75,7 @@ import { GeocodingModule } from './common/geocoding/geocoding.module';
               req: (req) => ({
                 id: req.id,
                 method: req.method,
-                url: req.url,
+                url: req.url?.split('?')[0],
               }),
               res: (res) => ({
                 statusCode: res.statusCode,

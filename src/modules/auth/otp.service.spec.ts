@@ -1,5 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import { HttpException, HttpStatus, ServiceUnavailableException } from '@nestjs/common';
+import { HttpException, ServiceUnavailableException } from '@nestjs/common';
 import { OtpService } from './otp.service';
 import { SmsService } from './sms.service';
 
@@ -30,7 +30,10 @@ describe('OtpService', () => {
         return row.value;
       }),
       setex: jest.fn(async (key: string, ttl: number, val: string) => {
-        redis.store.set(key, { value: val, expiresAt: Date.now() + ttl * 1000 });
+        redis.store.set(key, {
+          value: val,
+          expiresAt: Date.now() + ttl * 1000,
+        });
       }),
       del: jest.fn(async (key: string) => {
         redis.store.delete(key);
@@ -77,16 +80,12 @@ describe('OtpService', () => {
 
   it('enforces per-phone resend cooldown', async () => {
     await redis.setex(`otp:cooldown:${phone}`, 25, '1');
-    await expect(service.request(phone)).rejects.toThrow(
-      HttpException,
-    );
+    await expect(service.request(phone)).rejects.toThrow(HttpException);
   });
 
   it('enforces per-phone hourly request cap', async () => {
     redis.incr.mockResolvedValueOnce(6);
-    await expect(service.request(phone)).rejects.toThrow(
-      HttpException,
-    );
+    await expect(service.request(phone)).rejects.toThrow(HttpException);
   });
 
   it('returns immediately in production without awaiting SMS', async () => {
@@ -117,7 +116,9 @@ describe('OtpService', () => {
       sms as unknown as SmsService,
     );
     const code = '654321';
-    const hash = (prod as unknown as { hash: (p: string, c: string) => string }).hash(phone, code);
+    const hash = (
+      prod as unknown as { hash: (p: string, c: string) => string }
+    ).hash(phone, code);
     await redis.setex(`otp:phone:${phone}`, 300, hash);
     await prod.consumeCode(phone, code);
     await expect(prod.consumeCode(phone, code)).rejects.toThrow(

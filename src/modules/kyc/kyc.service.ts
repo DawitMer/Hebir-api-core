@@ -44,6 +44,33 @@ const VEHICLE_CHANGE_DOC_TYPES = ['registration', 'insurance'] as const;
 
 @Injectable()
 export class KycService {
+  private transactional = false;
+
+  /** One driver's application/documents/vehicle/audit changes commit together. */
+  private withDriverLock<T>(
+    driverId: string,
+    action: (service: KycService) => Promise<T>,
+  ): Promise<T> {
+    return this.verifications.manager.transaction(async (em) => {
+      const driver = await em.findOne(UserAccount, {
+        where: { id: driverId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!driver) throw new NotFoundException('Driver not found');
+      const scoped = new KycService(
+        em.getRepository(DriverVerification),
+        em.getRepository(DocumentSubmission),
+        em.getRepository(AuditTrail),
+        em.getRepository(ComplianceAlert),
+        em.getRepository(UserAccount),
+        em.getRepository(Vehicle),
+        this.subscriptionService,
+        this.storage,
+      );
+      scoped.transactional = true;
+      return action(scoped);
+    });
+  }
   constructor(
     @InjectRepository(DriverVerification)
     private readonly verifications: Repository<DriverVerification>,
@@ -96,12 +123,42 @@ export class KycService {
   }
 
   async startOrGetMyVerification(driverId: string, dto: StartVerificationDto) {
+    if (!this.transactional)
+      return this.withDriverLock(driverId, (service) =>
+        service.startOrGetMyVerification(driverId, dto),
+      );
     const existing = await this.verifications.findOne({
       where: { driverId },
       order: { submittedAt: 'DESC' },
     });
     if (existing && existing.status !== VerificationStatus.REJECTED) {
       if (existing.status !== VerificationStatus.APPROVED) {
+        let changed = false;
+        if (
+          dto.licenseNumber &&
+          dto.licenseNumber.trim() !== existing.licenseNumber
+        ) {
+          existing.licenseNumber = dto.licenseNumber.trim();
+          changed = true;
+        }
+        if (dto.region && dto.region.trim() !== existing.region) {
+          existing.region = dto.region.trim();
+          changed = true;
+        }
+        if (
+          dto.vehicleType &&
+          dto.vehicleType.trim() !== existing.vehicleType
+        ) {
+          existing.vehicleType = dto.vehicleType.trim();
+          changed = true;
+        }
+        if (dto.vehicleYear && dto.vehicleYear !== existing.vehicleYear) {
+          existing.vehicleYear = dto.vehicleYear;
+          changed = true;
+        }
+        if (changed) {
+          await this.verifications.save(existing);
+        }
         await this.ensureVehicleFromApplication(driverId, existing, dto);
       }
       return existing;
@@ -134,9 +191,6 @@ export class KycService {
     verification: DriverVerification,
     dto?: StartVerificationDto,
   ) {
-    const existing = await this.vehicles.findOne({ where: { driverId } });
-    if (existing) return;
-
     const plate = (dto?.licenseNumber ?? verification.licenseNumber)?.trim();
     const type = (dto?.vehicleType ?? verification.vehicleType)?.trim();
     if (!plate || !type) return;
@@ -144,6 +198,21 @@ export class KycService {
     const parts = type.split(/\s+/).filter(Boolean);
     const make = parts[0];
     const model = parts.slice(1).join(' ') || make;
+
+    const existing = await this.vehicles.findOne({ where: { driverId } });
+    if (existing) {
+      if (verification.status !== VerificationStatus.APPROVED) {
+        existing.make = make;
+        existing.model = model;
+        existing.plate = plate;
+        if (dto?.vehicleColor !== undefined) {
+          existing.color = dto.vehicleColor?.trim() || null;
+        }
+        await this.vehicles.save(existing);
+      }
+      return;
+    }
+
     await this.vehicles.save(
       this.vehicles.create({
         driverId,
@@ -162,20 +231,11 @@ export class KycService {
       order: { submittedAt: 'DESC' },
     });
     if (!existing) throw new NotFoundException('No KYC application yet');
-    if (existing.status !== VerificationStatus.APPROVED) {
-      await this.ensureVehicleFromApplication(driverId, existing);
-    }
     return existing;
   }
 
   async listMyDocuments(driverId: string) {
     const verification = await this.getMyVerification(driverId);
-    if (
-      verification.status === VerificationStatus.APPROVED &&
-      !verification.vehicleChangePending
-    ) {
-      await this.markDocumentsApproved(verification.id);
-    }
     return this.listDocuments(verification.id);
   }
 
@@ -186,11 +246,45 @@ export class KycService {
   async filterApprovedDriverIds(driverIds: string[]): Promise<Set<string>> {
     const unique = [...new Set(driverIds.filter(Boolean))];
     if (!unique.length) return new Set();
-    const rows = await this.verifications.find({
-      where: { driverId: In(unique), status: VerificationStatus.APPROVED },
-      select: { driverId: true },
+    const rows = await this.verifications
+      .createQueryBuilder('v')
+      .distinctOn(['v.driverId'])
+      .where('v.driverId IN (:...unique)', { unique })
+      .orderBy('v.driverId')
+      .addOrderBy('v.submittedAt', 'DESC')
+      .getMany();
+    const approved = rows.filter(
+      (row) => row.status === VerificationStatus.APPROVED,
+    );
+    if (!approved.length) return new Set<string>();
+    const docs = await this.documents.find({
+      where: { driverVerificationId: In(approved.map((row) => row.id)) },
     });
-    return new Set(rows.map((row) => row.driverId));
+    return new Set(
+      approved
+        .filter((row) => {
+          const valid = new Set(
+            docs
+              .filter(
+                (doc) =>
+                  doc.driverVerificationId === row.id &&
+                  doc.status === DocumentReviewStatus.APPROVED &&
+                  (!documentRequiresExpiry(doc.documentType) ||
+                    doc.expiresAt != null) &&
+                  !isKycDocumentExpired(doc.expiresAt),
+              )
+              .map((doc) => doc.documentType),
+          );
+          return [
+            'license',
+            'national_id',
+            'registration',
+            'insurance',
+            'selfie',
+          ].every((type) => valid.has(type));
+        })
+        .map((row) => row.driverId),
+    );
   }
 
   /**
@@ -248,6 +342,10 @@ export class KycService {
    * touched until they approve. License / ID / selfie stay locked.
    */
   async requestVehicleChange(driverId: string, dto: VehicleChangeDto) {
+    if (!this.transactional)
+      return this.withDriverLock(driverId, (service) =>
+        service.requestVehicleChange(driverId, dto),
+      );
     const verification = await this.getMyVerification(driverId);
     if (verification.status === VerificationStatus.REJECTED) {
       throw new ConflictException(
@@ -371,6 +469,41 @@ export class KycService {
   }
 
   async confirmUpload(driverId: string, dto: ConfirmDocumentDto) {
+    if (!this.transactional) {
+      this.parseRequiredExpiry(dto.documentType, dto.expiresAt);
+      if (!dto.storageKey.startsWith(`kyc/${driverId}/${dto.documentType}/`))
+        throw new ForbiddenException('Invalid storage key');
+      try {
+        await this.storage.assertUploadedObject(dto.storageKey);
+      } catch {
+        throw new BadRequestException(
+          'Upload a valid non-empty file before confirming',
+        );
+      }
+      const result = await this.withDriverLock(driverId, (service) =>
+        service.confirmUpload(driverId, dto),
+      );
+      // The durable row makes confirmation idempotent even if cache cleanup fails.
+      await this.storage.markUploaded(dto.storageKey).catch(() => undefined);
+      return result;
+    }
+    const existingDocument = await this.documents.findOne({
+      where: { storageKey: dto.storageKey },
+    });
+    if (existingDocument) {
+      const owner = await this.getVerification(
+        existingDocument.driverVerificationId,
+      );
+      if (
+        owner.driverId !== driverId ||
+        existingDocument.documentType !== dto.documentType
+      )
+        throw new ForbiddenException('Invalid storage key');
+      return {
+        ...existingDocument,
+        viewUrl: await this.storage.createViewUrl(existingDocument.storageKey),
+      };
+    }
     const verification = await this.assertCanUpload(driverId, dto.documentType);
     if (!dto.storageKey.startsWith(`kyc/${driverId}/`)) {
       throw new ForbiddenException('Invalid storage key');
@@ -395,8 +528,6 @@ export class KycService {
         'Upload session expired — request a new presign',
       );
     }
-
-    await this.storage.markUploaded(dto.storageKey);
 
     const expiresAt = this.parseRequiredExpiry(dto.documentType, dto.expiresAt);
 
@@ -426,7 +557,11 @@ export class KycService {
     );
 
     await this.refreshMissingFlags(verification.id);
-    if (verification.status === VerificationStatus.PENDING) {
+    if (
+      verification.status === VerificationStatus.PENDING ||
+      (verification.status === VerificationStatus.APPROVED &&
+        !verification.vehicleChangePending)
+    ) {
       verification.status = VerificationStatus.IN_REVIEW;
       await this.verifications.save(verification);
     }
@@ -474,13 +609,6 @@ export class KycService {
       throw new ConflictException(
         'This application was rejected. Start a new KYC application first.',
       );
-    }
-
-    if (
-      verification.status === VerificationStatus.APPROVED &&
-      !verification.vehicleChangePending
-    ) {
-      await this.markDocumentsApproved(verification.id);
     }
 
     const existing = await this.documents.findOne({
@@ -549,7 +677,11 @@ export class KycService {
     });
     const types = new Set(
       docs
-        .filter((d) => !isKycDocumentExpired(d.expiresAt))
+        .filter(
+          (d) =>
+            (!documentRequiresExpiry(d.documentType) || d.expiresAt != null) &&
+            !isKycDocumentExpired(d.expiresAt),
+        )
         .map((d) => d.documentType),
     );
     verification.missingId = !types.has('national_id') && !types.has('license');
@@ -564,6 +696,16 @@ export class KycService {
     actorRole: string,
   ) {
     const verification = await this.getVerification(id);
+    if (!this.transactional)
+      return this.withDriverLock(verification.driverId, (service) =>
+        service.assign(id, agentId, actorId, actorRole),
+      );
+    if (
+      [VerificationStatus.APPROVED, VerificationStatus.REJECTED].includes(
+        verification.status,
+      )
+    )
+      throw new ConflictException('This application has already been decided');
     verification.assignedToId = agentId;
     verification.status = VerificationStatus.IN_REVIEW;
     await this.verifications.save(verification);
@@ -580,6 +722,42 @@ export class KycService {
     actorRole: string,
   ) {
     const verification = await this.getVerification(id);
+    if (!this.transactional)
+      return this.withDriverLock(verification.driverId, (service) =>
+        service.decide(id, dto, actorId, actorRole),
+      );
+    if (dto.decision === ReviewDecision.APPROVE) {
+      const docs = await this.documents.find({
+        where: { driverVerificationId: id },
+      });
+      const valid = new Set(
+        docs
+          .filter(
+            (doc) =>
+              (!documentRequiresExpiry(doc.documentType) ||
+                doc.expiresAt != null) &&
+              !isKycDocumentExpired(doc.expiresAt) &&
+              ![
+                DocumentReviewStatus.REJECTED,
+                DocumentReviewStatus.RESUBMISSION_REQUESTED,
+              ].includes(doc.status),
+          )
+          .map((doc) => doc.documentType),
+      );
+      if (
+        ![
+          'license',
+          'national_id',
+          'registration',
+          'insurance',
+          'selfie',
+        ].every((type) => valid.has(type))
+      ) {
+        throw new ConflictException(
+          'All required unexpired documents must be uploaded before approval',
+        );
+      }
+    }
 
     if (
       verification.status === VerificationStatus.APPROVED &&

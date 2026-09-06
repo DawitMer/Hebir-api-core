@@ -108,6 +108,7 @@ export async function googleAccessToken(
 
   const res = await fetchImpl('https://oauth2.googleapis.com/token', {
     method: 'POST',
+    signal: AbortSignal.timeout(10_000),
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',

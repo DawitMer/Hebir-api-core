@@ -7,6 +7,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import { GeoPoint } from '../../matching/entities/trip.entity';
+import type { FareRates } from '../../fare/fare-rates';
 
 export enum RideStatus {
   REQUESTED = 'requested',
@@ -81,6 +82,10 @@ export class Ride {
    */
   @Column({ type: 'double precision', nullable: true })
   quotedSurgeMultiplier: number | null;
+
+  /** Fare policy snapshot; later operations edits cannot reprice an active trip. */
+  @Column({ type: 'jsonb', nullable: true })
+  quotedFareRates: FareRates | null;
 
   /** Driver currently holding the live offer (cleared once resolved). */
   @Column({ type: 'uuid', nullable: true })

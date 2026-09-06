@@ -13,6 +13,9 @@ export function buildKycS3Client(input: {
 }): S3Client {
   const r2 = isCloudflareR2Endpoint(input.endpoint);
   const config: S3ClientConfig = {
+    // The signing API has not received the file bytes. Do not sign the SDK's
+    // checksum for an empty body onto a URL used later for a non-empty upload.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
     region: r2
       ? input.region?.trim() || 'auto'
       : input.region?.trim() || 'us-east-1',

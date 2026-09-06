@@ -1,4 +1,4 @@
-import { Body, Controller, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Headers, Post, UseGuards } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { OtpService, RequestOtpDto, VerifyOtpDto } from './otp.service';
 import { RegisterDto } from './dto/register.dto';
@@ -85,8 +85,14 @@ export class AuthController {
   @UseGuards(RedisRateLimitGuard)
   @RateLimit(RateLimitPresets.authRefresh)
   @Post('logout')
-  logout(@Body() dto: RefreshTokenDto) {
-    return this.authService.logout(dto.refreshToken);
+  logout(
+    @Body() dto: RefreshTokenDto,
+    @Headers('authorization') authorization?: string,
+  ) {
+    return this.authService.logoutWithAccessToken(
+      dto.refreshToken,
+      authorization,
+    );
   }
 
   @UseGuards(JwtAuthGuard, RedisRateLimitGuard)

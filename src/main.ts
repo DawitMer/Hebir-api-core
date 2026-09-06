@@ -2,7 +2,8 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Logger } from 'nestjs-pino';
-import * as express from 'express';
+import express from 'express';
+import compression from 'compression';
 import helmet from 'helmet';
 import { loadSecretsIntoEnv } from './config/secrets/load-secrets';
 import {
@@ -24,6 +25,8 @@ async function bootstrap() {
   app.useLogger(app.get(Logger));
   const config = app.get(ConfigService);
   const logger = app.get(Logger);
+
+  app.use(compression({ threshold: 512 }));
 
   // Parse raw binary payloads for KYC document uploads up to 15MB
   app.use(

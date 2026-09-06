@@ -43,6 +43,15 @@ export class UsersController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Post('me/device-token/remove')
+  unregisterDeviceToken(
+    @CurrentUser() user: { userId: string },
+    @Body() dto: RegisterDeviceTokenDto,
+  ) {
+    return this.push.unregisterToken(user.userId, dto.token);
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Delete('me')
   deleteMe(@CurrentUser() user: { userId: string; jti?: string }) {
     return this.usersService.deleteMe(user.userId, user.jti);

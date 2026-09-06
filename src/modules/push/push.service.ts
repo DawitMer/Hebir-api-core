@@ -30,19 +30,13 @@ export class PushService {
   async registerToken(userId: string, token: string, platform: string) {
     const trimmed = token.trim();
     if (!trimmed || trimmed.length > 512) return { registered: false };
-    const existing = await this.tokens.findOne({ where: { token: trimmed } });
-    if (existing) {
-      existing.userId = userId;
-      existing.platform = platform === 'ios' ? 'ios' : 'android';
-      await this.tokens.save(existing);
-      return { registered: true };
-    }
-    await this.tokens.save(
-      this.tokens.create({
+    await this.tokens.upsert(
+      {
         userId,
         token: trimmed,
         platform: platform === 'ios' ? 'ios' : 'android',
-      }),
+      },
+      ['token'],
     );
     return { registered: true };
   }
@@ -55,6 +49,11 @@ export class PushService {
     const copy = pushCopyForEvent(event, payload);
     if (!copy) return;
     await this.send(userId, event, copy.title, copy.body, payload);
+  }
+
+  async unregisterToken(userId: string, token: string) {
+    await this.tokens.delete({ userId, token: token.trim() });
+    return { unregistered: true };
   }
 
   async send(
@@ -85,6 +84,7 @@ export class PushService {
           `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(sa.project_id)}/messages:send`,
           {
             method: 'POST',
+            signal: AbortSignal.timeout(10_000),
             headers: {
               Authorization: `Bearer ${accessToken}`,
               'Content-Type': 'application/json',

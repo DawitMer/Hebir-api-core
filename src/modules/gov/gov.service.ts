@@ -266,6 +266,23 @@ export class GovService {
 
     return {
       driverId,
+      sampleLimit: 100,
+      totalTrips: await this.rides.count({
+        where: { driverId, status: RideStatus.COMPLETED },
+      }),
+      totalGross: Number(
+        (
+          await this.fares
+            .createQueryBuilder('f')
+            .innerJoin(Ride, 'r', 'r.id = f.rideId')
+            .where('r.driverId = :driverId AND r.status = :status', {
+              driverId,
+              status: RideStatus.COMPLETED,
+            })
+            .select('COALESCE(SUM(f.total::numeric), 0)', 'total')
+            .getRawOne()
+        )?.total ?? 0,
+      ),
       trips: rides.map((r) => {
         const fare = fareMap.get(r.id);
         return {
@@ -274,8 +291,8 @@ export class GovService {
           pickup: r.pickupAddress,
           dropoff: r.dropoffAddress,
           completedAt: r.completedAt,
-          distanceM: r.distanceM,
-          durationS: r.durationS,
+          distanceM: r.actualDistanceM ?? r.distanceM,
+          durationS: r.actualDurationS ?? r.durationS,
           fareTotal: fare ? Number(fare.total) : 0,
         };
       }),
@@ -286,63 +303,73 @@ export class GovService {
     const driver = await this.users.findOne({ where: { id: driverId } });
     if (!driver) throw new NotFoundException('Driver not found');
 
-    const confirmedBookings = await this.bookings
-      .createQueryBuilder('booking')
-      .innerJoin('trips', 'trip', 'trip.id = booking.tripId')
-      .where('trip.driverId = :driverId', { driverId })
-      .andWhere('booking.status = :status', {
-        status: BookingStatus.CONFIRMED,
-      })
-      .select([
-        'booking.calculatedFare AS "calculatedFare"',
-        'booking.createdAt AS "createdAt"',
-      ])
-      .getRawMany<{ calculatedFare: string; createdAt: Date }>();
-
-    const bookingGross = confirmedBookings.reduce(
-      (sum, b) => sum + Number(b.calculatedFare),
+    const year = new Date().getUTCFullYear();
+    const start = new Date(Date.UTC(year, 0, 1));
+    const end = new Date(Date.UTC(year + 1, 0, 1));
+    // Aggregate in SQL, never sum a paged UI sample. Reporting period is explicit.
+    const rows = (await this.rides.manager.query(
+      `
+      WITH revenue AS (
+        SELECT r."completedAt" AS at, f.total::numeric AS gross,
+          f."platformFee"::numeric AS fee, 1 AS trips
+        FROM rides r JOIN fares f ON f."rideId" = r.id
+        WHERE r."driverId" = $1 AND r.status = 'completed'
+        UNION ALL
+        SELECT b."createdAt", b."calculatedFare"::numeric, 0, 1
+        FROM bookings b JOIN trips t ON t.id = b."tripId"
+        WHERE t."driverId" = $1 AND b.status = 'confirmed'
+        UNION ALL
+        SELECT t."createdAt", t.amount::numeric, 0, 0 FROM tips t
+        WHERE t."driverId" = $1 AND t.status = 'succeeded'
+      ), months AS (
+        SELECT generate_series($2::timestamptz, $3::timestamptz - interval '1 month', interval '1 month') AS month
+      )
+      SELECT to_char(m.month AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
+        COALESCE((SELECT SUM(gross) FROM revenue WHERE at >= m.month AND at < m.month + interval '1 month'), 0) AS gross,
+        COALESCE((SELECT SUM(fee) FROM revenue WHERE at >= m.month AND at < m.month + interval '1 month'), 0) AS fee,
+        COALESCE((SELECT SUM(trips) FROM revenue WHERE at >= m.month AND at < m.month + interval '1 month'), 0) AS trips,
+        COALESCE((SELECT SUM(e.amount::numeric) FROM driver_expenses e WHERE e."driverId" = $1
+          AND e."incurredAt" >= m.month AND e."incurredAt" < m.month + interval '1 month'), 0) AS expenses
+      FROM months m ORDER BY m.month
+    `,
+      [driverId, start, end],
+    )) as Array<{
+      month: string;
+      gross: string;
+      fee: string;
+      trips: string;
+      expenses: string;
+    }>;
+    const monthlyBreakdown = rows.map((row) => ({
+      month: row.month,
+      gross: Number(row.gross),
+      serviceFee: Number(row.fee),
+      trips: Number(row.trips),
+      expenses: Number(row.expenses),
+      netTaxable: Number(row.gross) - Number(row.expenses),
+      status: 'reported',
+    }));
+    const grossEarnings = monthlyBreakdown.reduce(
+      (sum, row) => sum + row.gross,
       0,
     );
-
-    const completedRides = await this.rides.find({
-      where: { driverId, status: RideStatus.COMPLETED },
-      order: { completedAt: 'DESC' },
-      take: MAX_REPORT_ROWS,
-    });
-    const fareRows =
-      completedRides.length === 0
-        ? []
-        : await this.fares.find({
-            where: { rideId: In(completedRides.map((r) => r.id)) },
-          });
-    const rideGross = fareRows.reduce((sum, f) => sum + Number(f.total), 0);
-    // Zero under the current subscription-only business model, but computed
-    // from fare records so it stays truthful if the model ever changes.
-    const platformFees = fareRows.reduce(
-      (sum, f) => sum + Number(f.platformFee),
+    const reportedExpenses = monthlyBreakdown.reduce(
+      (sum, row) => sum + row.expenses,
       0,
     );
-
-    const driverExpenses = await this.expenses.find({
-      where: { driverId },
-      order: { incurredAt: 'DESC' },
-      take: MAX_REPORT_ROWS,
-    });
-    const reportedExpenses = driverExpenses.reduce(
-      (sum, e) => sum + Number(e.amount),
-      0,
-    );
-
-    const grossEarnings = bookingGross + rideGross;
-    const totalTrips = confirmedBookings.length + completedRides.length;
-
     return {
       driverId,
-      totalTrips,
+      fiscalYear: year,
+      reportPeriod: { start, end, basis: 'UTC calendar year' },
+      totalTrips: monthlyBreakdown.reduce((sum, row) => sum + row.trips, 0),
       grossEarnings,
       reportedExpenses,
       netTaxableEarnings: grossEarnings - reportedExpenses,
-      platformFees,
+      platformFees: monthlyBreakdown.reduce(
+        (sum, row) => sum + row.serviceFee,
+        0,
+      ),
+      monthlyBreakdown,
     };
   }
 
@@ -355,6 +382,7 @@ export class GovService {
   }
 
   async getDashboardStats() {
+    const yearStart = new Date(Date.UTC(new Date().getUTCFullYear(), 0, 1));
     const [
       totalDrivers,
       activeSubscriptions,
@@ -364,6 +392,7 @@ export class GovService {
       fareSum,
       pendingAuditDrivers,
       driversWithExpenses,
+      expenseSum,
     ] = await Promise.all([
       this.users
         .createQueryBuilder('u')
@@ -375,6 +404,11 @@ export class GovService {
       this.rides.count({ where: { status: RideStatus.COMPLETED } }),
       this.fares
         .createQueryBuilder('f')
+        .innerJoin(Ride, 'r', 'r.id = f.rideId')
+        .where('r.completedAt >= :yearStart AND r.status = :status', {
+          yearStart,
+          status: RideStatus.COMPLETED,
+        })
         .select('COALESCE(SUM(f.total::numeric), 0)', 'sum')
         .getRawOne<{ sum: string }>(),
       // Not (good standing + approved KYC) — SQL aggregate, not a row dump.
@@ -394,6 +428,11 @@ export class GovService {
         .createQueryBuilder('e')
         .select('COUNT(DISTINCT e.driverId)', 'count')
         .getRawOne<{ count: string }>(),
+      this.expenses
+        .createQueryBuilder('e')
+        .select('COALESCE(SUM(e.amount::numeric), 0)', 'total')
+        .where('e.incurredAt >= :yearStart', { yearStart })
+        .getRawOne<{ total: string }>(),
     ]);
 
     const withExpenses = Number(driversWithExpenses?.count ?? 0);
@@ -405,6 +444,7 @@ export class GovService {
       totalBookings,
       completedOnDemandRides: completedRides,
       grossEarningsYtd: Number(fareSum?.sum ?? 0),
+      reportedExpensesYtd: Number(expenseSum?.total ?? 0),
       pendingAuditDrivers,
       driversWithoutExpenses: Math.max(totalDrivers - withExpenses, 0),
       ...(await this.buildNationalMonthlyEarnings()),
