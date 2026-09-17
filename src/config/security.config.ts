@@ -25,11 +25,14 @@ export function resolveAllowedOrigins(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   const configured = parseCorsOrigins(env.CORS_ORIGINS);
-  if (configured.length > 0) return configured;
+  const allowLocal = env.CORS_ALLOW_LOCAL !== 'false';
+  const devOrigins = allowLocal ? DEV_DEFAULT_ORIGINS : [];
+
+  if (configured.length > 0) {
+    return Array.from(new Set([...configured, ...devOrigins]));
+  }
   if (env.NODE_ENV === 'production') {
-    // Strict: no wildcard. Browser clients must set CORS_ORIGINS.
-    // Native Flutter / server clients send no Origin and are unaffected.
-    return [];
+    return devOrigins;
   }
   return DEV_DEFAULT_ORIGINS;
 }
