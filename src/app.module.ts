@@ -23,6 +23,7 @@ import { AdminModule } from './modules/admin/admin.module';
 import { IncidentsModule } from './modules/incidents/incidents.module';
 import { SupportModule } from './modules/support/support.module';
 import { HealthController } from './modules/admin/health.controller';
+import { AppController } from './app.controller';
 import {
   getRequestId,
   resolveOrCreateRequestId,
@@ -112,6 +113,6 @@ import { PromotionsModule } from './modules/promotions/promotions.module';
     RatingsModule,
     PromotionsModule,
   ],
-  controllers: [HealthController],
+  controllers: [AppController, HealthController],
 })
 export class AppModule {}
