@@ -10,6 +10,7 @@ import {
   UnauthorizedException,
   UnprocessableEntityException,
   forwardRef,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
@@ -190,6 +191,7 @@ type StartCodeRecord = {
 
 import { TripRouteRecorderService } from './trip-route-recorder.service';
 import { AdRewardsService } from '../ads/ads.service';
+import { PromotionsService } from '../promotions/promotions.service';
 
 @Injectable()
 export class RidesService {
@@ -226,7 +228,10 @@ export class RidesService {
     @Inject(FARE_PAYMENT_PROVIDER)
     private readonly farePayments: PaymentProvider,
     private readonly routeRecorder: TripRouteRecorderService,
+    @Optional()
     private readonly adRewards?: AdRewardsService,
+    @Optional()
+    private readonly promotionsService?: PromotionsService,
   ) {}
 
   /**
@@ -1140,7 +1145,25 @@ export class RidesService {
             riderCashDueMinor: Math.round(Number(fareRecord.total) * 100),
             driverHebirCreditMinor: 0,
           };
-      const riderCashDue = (adSettlement.riderCashDueMinor / 100).toFixed(2);
+
+      const promoSettlement = this.promotionsService
+        ? await this.promotionsService.applyPromotionToRide(
+            em,
+            rideId,
+            lockedRide.riderId,
+            Math.round(Number(fareRecord.total) * 100),
+          )
+        : { appliedDiscountMinor: 0 };
+
+      const combinedDiscountMinor =
+        adSettlement.appliedDiscountMinor +
+        promoSettlement.appliedDiscountMinor;
+      const finalRiderCashDueMinor = Math.max(
+        0,
+        Math.round(Number(fareRecord.total) * 100) - combinedDiscountMinor,
+      );
+
+      const riderCashDue = (finalRiderCashDueMinor / 100).toFixed(2);
 
       const settled = await this.farePayments.settleFare({
         rideId,
@@ -1180,19 +1203,37 @@ export class RidesService {
       );
       await em.increment(DriverProfile, { userId: driverId }, 'totalTrips', 1);
 
-      return { fareTotal: fareRecord.total, riderCashDue, adSettlement, actualDistanceM, actualDurationS };
+      return {
+        fareTotal: fareRecord.total,
+        riderCashDue,
+        adSettlement,
+        promoSettlement,
+        actualDistanceM,
+        actualDurationS,
+      };
     });
-    const { fareTotal, riderCashDue, adSettlement, actualDistanceM, actualDurationS } = settlement;
+    const {
+      fareTotal,
+      riderCashDue,
+      adSettlement,
+      promoSettlement,
+      actualDistanceM,
+      actualDurationS,
+    } = settlement;
 
     const settledRide =
       (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
     const completionPayload = {
       rideId,
       status: RideStatus.COMPLETED,
-      fare: fareTotal,
+      fare: riderCashDue,
+      grossFare: fareTotal,
       riderCashDue,
       advertisingDiscount: adSettlement?.appliedDiscountMinor
         ? (adSettlement.appliedDiscountMinor / 100).toFixed(2)
+        : '0.00',
+      promotionDiscount: promoSettlement?.appliedDiscountMinor
+        ? (promoSettlement.appliedDiscountMinor / 100).toFixed(2)
         : '0.00',
       driverHebirCredit: adSettlement?.driverHebirCreditMinor
         ? (adSettlement.driverHebirCreditMinor / 100).toFixed(2)
@@ -1293,6 +1334,13 @@ export class RidesService {
         `Ride is already ${current?.status ?? 'closed'}`,
       );
     }
+
+    if (this.promotionsService) {
+      await this.rides.manager.transaction(async (em) => {
+        await this.promotionsService!.refundPromotion(em, rideId);
+      });
+    }
+
     await this.logEvent(
       rideId,
       RideStatus.CANCELLED,
@@ -2613,8 +2661,9 @@ export class RidesService {
     const eligibleVehicleTypes = vehicle
       ? this.eligibleVehicleTypesForCapacity(vehicle.capacity)
       : [];
-    const selected = (profile?.acceptedVehicleTypes ?? eligibleVehicleTypes)
-      .filter((type) => eligibleVehicleTypes.includes(type));
+    const selected = (
+      profile?.acceptedVehicleTypes ?? eligibleVehicleTypes
+    ).filter((type) => eligibleVehicleTypes.includes(type));
     return { eligibleVehicleTypes, acceptedVehicleTypes: selected };
   }
 
@@ -2627,13 +2676,14 @@ export class RidesService {
     });
     if (!profile) throw new NotFoundException('Driver profile not found');
     const vehicle = await this.vehicles.findOne({ where: { driverId } });
-    if (!vehicle) throw new BadRequestException('Add an approved vehicle first');
+    if (!vehicle)
+      throw new BadRequestException('Add an approved vehicle first');
     const eligibleVehicleTypes = this.eligibleVehicleTypesForCapacity(
       vehicle.capacity,
     );
-    const acceptedVehicleTypes = [...new Set(requestedTypes.map((type) =>
-      normalizeRideVehicleType(type),
-    ))];
+    const acceptedVehicleTypes = [
+      ...new Set(requestedTypes.map((type) => normalizeRideVehicleType(type))),
+    ];
     if (
       acceptedVehicleTypes.length === 0 ||
       acceptedVehicleTypes.some((type) => !eligibleVehicleTypes.includes(type))

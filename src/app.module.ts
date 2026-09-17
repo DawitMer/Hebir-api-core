@@ -30,6 +30,7 @@ import {
 import { LocationSvcModule } from './common/location-svc/location-svc.module';
 import { GeocodingModule } from './common/geocoding/geocoding.module';
 import { AdsModule } from './modules/ads/ads.module';
+import { PromotionsModule } from './modules/promotions/promotions.module';
 
 @Module({
   imports: [
@@ -109,6 +110,7 @@ import { AdsModule } from './modules/ads/ads.module';
     RidesModule,
     TipsModule,
     RatingsModule,
+    PromotionsModule,
   ],
   controllers: [HealthController],
 })

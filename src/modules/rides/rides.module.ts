@@ -25,6 +25,11 @@ import { AdsModule } from '../ads/ads.module';
 
 import { TripRouteRecorderService } from './trip-route-recorder.service';
 
+import { PromotionsModule } from '../promotions/promotions.module';
+
+import { AdminRidesController } from './admin-rides.controller';
+import { AdminRidesService } from './admin-rides.service';
+
 @Module({
   imports: [
     ScheduleModule.forRoot(),
@@ -47,9 +52,19 @@ import { TripRouteRecorderService } from './trip-route-recorder.service';
     KycModule,
     PaymentsModule,
     AdsModule,
+    PromotionsModule,
   ],
-  controllers: [RidesController, DriverPresenceController],
-  providers: [RidesService, DispatchQueueService, TripRouteRecorderService],
+  controllers: [
+    RidesController,
+    DriverPresenceController,
+    AdminRidesController,
+  ],
+  providers: [
+    RidesService,
+    DispatchQueueService,
+    TripRouteRecorderService,
+    AdminRidesService,
+  ],
   exports: [RidesService, TripRouteRecorderService],
 })
 export class RidesModule {}

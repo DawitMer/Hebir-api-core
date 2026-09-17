@@ -364,7 +364,15 @@ export class LocationController {
     if (bbox.maxLat - bbox.minLat > 1 || bbox.maxLng - bbox.minLng > 1) {
       throw new BadRequestException('Bounding box is too large');
     }
-    return this.locationSvc.get('/demand/grid', bbox, 2500);
+    if (this.locationSvc.enabled && !this.locationSvc.isOpen) {
+      try {
+        const res = await this.locationSvc.get('/demand/grid', bbox, 2500);
+        if (res) return res;
+      } catch {
+        // Fall back to empty cells if location-svc is unavailable
+      }
+    }
+    return { cells: [] };
   }
 
   /**

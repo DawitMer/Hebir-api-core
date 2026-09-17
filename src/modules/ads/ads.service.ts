@@ -1,27 +1,474 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm'; import { EntityManager, Repository } from 'typeorm'; import { createHash, randomBytes } from 'crypto';
-import { AdCampaign, AdRewardEvent, AdViewSession, CampaignState, CashoutState, DriverCashoutRequest, DriverWalletEntry, RiderAdProfile, RideAdSettlement, ViewState } from './entities/ad-rewards.entity'; import { Ride, RideStatus } from '../rides/entities/ride.entity';
-const ADULT = new Set(['18-24','25-34','35-44','45-54','55+']); const ETB3 = 300; const MAX_REWARDS = 5;
-const tokenHash = (value: string) => createHash('sha256').update(value).digest('hex');
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { EntityManager, Repository } from 'typeorm';
+import { createHash, randomBytes } from 'crypto';
+import {
+  AdCampaign,
+  AdRewardEvent,
+  AdViewSession,
+  CampaignState,
+  CashoutState,
+  DriverCashoutRequest,
+  DriverWalletEntry,
+  RiderAdProfile,
+  RideAdSettlement,
+  ViewState,
+} from './entities/ad-rewards.entity';
+import { Ride, RideStatus } from '../rides/entities/ride.entity';
+const ADULT = new Set(['18-24', '25-34', '35-44', '45-54', '55+']);
+const ETB3 = 300;
+const MAX_REWARDS = 5;
+const tokenHash = (value: string) =>
+  createHash('sha256').update(value).digest('hex');
 @Injectable()
 export class AdRewardsService {
- constructor(@InjectRepository(AdCampaign) private campaigns:Repository<AdCampaign>, @InjectRepository(RiderAdProfile) private profiles:Repository<RiderAdProfile>, @InjectRepository(AdViewSession) private sessions:Repository<AdViewSession>, @InjectRepository(AdRewardEvent) private rewards:Repository<AdRewardEvent>, @InjectRepository(RideAdSettlement) private settlements:Repository<RideAdSettlement>, @InjectRepository(DriverWalletEntry) private wallet:Repository<DriverWalletEntry>, @InjectRepository(DriverCashoutRequest) private cashouts:Repository<DriverCashoutRequest>, @InjectRepository(Ride) private rides:Repository<Ride>) {}
- async profile(riderId:string) { return this.profiles.findOne({where:{riderId}}); }
- async updateProfile(riderId:string, data:Partial<RiderAdProfile>) { const old=await this.profile(riderId); const consented=!!data.consented; return this.profiles.save(this.profiles.create({...old,...data,riderId,consented,consentVersion: consented ? data.consentVersion ?? old?.consentVersion ?? 'v1' : old?.consentVersion ?? null, consentedAt: consented ? old?.consentedAt ?? new Date() : old?.consentedAt ?? null, withdrawnAt: consented ? null : new Date()})); }
- private async eligible(rideId:string,riderId:string) { const ride=await this.rides.findOne({where:{id:rideId}}); if(!ride) throw new NotFoundException('Ride not found'); if(ride.riderId!==riderId) throw new ForbiddenException('Ride does not belong to rider'); if(ride.status!==RideStatus.IN_PROGRESS) throw new ConflictException('Sponsored rewards are only available during an in-progress trip'); const p=await this.profile(riderId); if(!p?.consented || !ADULT.has(p.ageBand)) throw new ForbiddenException('Rider is not eligible for sponsored rewards'); return {ride,p}; }
- async availability(rideId:string,riderId:string) { const {p}=await this.eligible(rideId,riderId); const rewardCount=await this.rewards.count({where:{rideId}}); if(rewardCount>=MAX_REWARDS) return {available:false, reason:'trip_limit', earnedMinor:rewardCount*ETB3, remaining:0}; const now=new Date(); const done=(await this.rewards.find({where:{riderId}})).map(x=>x.campaignId); const all=await this.campaigns.find({where:{state:CampaignState.ACTIVE}}); const candidates=all.filter(c=>c.startsAt<=now&&c.endsAt>now&&Number(c.budgetMinor)-Number(c.reservedMinor)>=ETB3&&c.ageBands.includes(p.ageBand)&&c.workCategories.includes(p.workCategory)&&!done.includes(c.id)); if(!candidates.length) return {available:false,reason:'no_inventory',earnedMinor:rewardCount*ETB3,remaining:MAX_REWARDS-rewardCount}; const total=candidates.reduce((n,c)=>n+c.deliveryWeight,0); let pick=Math.random()*total; const campaign=candidates.find(c=>(pick-=c.deliveryWeight)<=0) ?? candidates[0]; return {available:true, earnedMinor:rewardCount*ETB3, remaining:MAX_REWARDS-rewardCount, campaign:this.creative(campaign)}; }
- private creative(c:AdCampaign) { return {id:c.id,sponsorName:c.sponsorName,title:c.title,message:c.message,assetUrl:c.assetUrl,ctaLabel:c.ctaLabel,ctaUrl:c.ctaUrl,requiredViewSeconds:c.requiredViewSeconds,rewardMinor:ETB3}; }
- async start(rideId:string,riderId:string) { const availability=await this.availability(rideId,riderId); if(!availability.available) return availability; const active=await this.sessions.findOne({where:{riderId,state:ViewState.STARTED}}); if(active && active.expiresAt>new Date()) throw new ConflictException('A sponsored viewing session is already active'); if(active) await this.sessions.update(active.id,{state:ViewState.EXPIRED}); const raw=randomBytes(32).toString('base64url'); const c=availability.campaign!; const session=await this.sessions.save(this.sessions.create({riderId,rideId,campaignId:c.id,tokenHash:tokenHash(raw),requiredViewSeconds:c.requiredViewSeconds,expiresAt:new Date(Date.now()+(c.requiredViewSeconds+90)*1000),lastHeartbeatAt:new Date()})); return {available:true,sessionId:session.id,token:raw,campaign:c,requiredViewSeconds:session.requiredViewSeconds}; }
- async heartbeat(sessionId:string,riderId:string,token:string,sequence:number,visibleSeconds:number,videoPlaying=true) { const s=await this.sessions.findOne({where:{id:sessionId,riderId}}); if(!s||s.tokenHash!==tokenHash(token)) throw new ForbiddenException('Invalid viewing session'); if(s.state!==ViewState.STARTED||s.expiresAt<=new Date()) throw new ConflictException('Viewing session has expired'); await this.eligible(s.rideId,riderId); if(sequence<=s.lastSequence) throw new ConflictException('Heartbeat replayed'); const elapsed=(Date.now()-s.lastHeartbeatAt.getTime())/1000; if(visibleSeconds>Math.ceil(elapsed)+2) throw new BadRequestException('Impossible viewing progress'); const increment=videoPlaying?Math.min(visibleSeconds,Math.ceil(elapsed)):0; s.lastSequence=sequence;s.verifiedSeconds=Math.min(s.requiredViewSeconds,s.verifiedSeconds+increment);s.lastHeartbeatAt=new Date(); await this.sessions.save(s); return {verifiedSeconds:s.verifiedSeconds,requiredViewSeconds:s.requiredViewSeconds,ready:s.verifiedSeconds>=s.requiredViewSeconds}; }
- async complete(sessionId:string,riderId:string,token:string) { return this.sessions.manager.transaction(async em=>{ const s=await em.findOne(AdViewSession,{where:{id:sessionId},lock:{mode:'pessimistic_write'}}); if(!s||s.riderId!==riderId||s.tokenHash!==tokenHash(token)) throw new ForbiddenException('Invalid viewing session'); const existing=await em.findOne(AdRewardEvent,{where:{sessionId}}); if(existing) return this.rewardResult(em,s.rideId,existing);
-   if(s.state!==ViewState.STARTED||s.expiresAt<=new Date()||s.verifiedSeconds<s.requiredViewSeconds) throw new ConflictException('Viewing duration has not been verified'); const ride=await em.findOne(Ride,{where:{id:s.rideId},lock:{mode:'pessimistic_write'}}); if(!ride||ride.riderId!==riderId||ride.status!==RideStatus.IN_PROGRESS) throw new ConflictException('Trip is no longer eligible'); const p=await em.findOne(RiderAdProfile,{where:{riderId},lock:{mode:'pessimistic_read'}}); if(!p?.consented||!ADULT.has(p.ageBand)) throw new ForbiddenException('Consent is no longer active'); const duplicate=await em.findOne(AdRewardEvent,{where:{riderId,campaignId:s.campaignId},lock:{mode:'pessimistic_read'}}); if(duplicate) { await em.update(AdViewSession,s.id,{state:ViewState.COMPLETED,completedAt:new Date()}); return this.rewardResult(em,s.rideId,duplicate); } const count=await em.count(AdRewardEvent,{where:{rideId:s.rideId}}); if(count>=MAX_REWARDS) throw new ConflictException('Trip reward limit reached'); const campaign=await em.findOne(AdCampaign,{where:{id:s.campaignId},lock:{mode:'pessimistic_write'}}); if(!campaign||campaign.state!==CampaignState.ACTIVE||Number(campaign.budgetMinor)-Number(campaign.reservedMinor)<ETB3) throw new ConflictException('Campaign budget exhausted'); await em.increment(AdCampaign,{id:campaign.id},'reservedMinor',ETB3); await em.update(AdViewSession,s.id,{state:ViewState.COMPLETED,completedAt:new Date()}); const reward=await em.save(em.create(AdRewardEvent,{riderId,rideId:s.rideId,campaignId:s.campaignId,sessionId:s.id,rewardMinor:ETB3})); return this.rewardResult(em,s.rideId,reward); }); }
- private async rewardResult(em:EntityManager,rideId:string,reward:AdRewardEvent) { const count=await em.count(AdRewardEvent,{where:{rideId}}); return {rewardId:reward.id,earnedMinor:count*ETB3,remaining:Math.max(0,MAX_REWARDS-count)}; }
- async savings(rideId:string,riderId:string) { await this.eligible(rideId,riderId); const n=await this.rewards.count({where:{rideId}}); return {earnedMinor:n*ETB3,rewardCount:n,remaining:MAX_REWARDS-n}; }
- async settleRide(em:EntityManager,ride:Ride,grossFareEtb:string) { const old=await em.findOne(RideAdSettlement,{where:{rideId:ride.id},lock:{mode:'pessimistic_write'}}); if(old) return old; const rewards=await em.count(AdRewardEvent,{where:{rideId:ride.id}}); const gross=Math.max(0,Math.round(Number(grossFareEtb)*100)); const discount=Math.min(gross,rewards*ETB3,1500); const settled=await em.save(em.create(RideAdSettlement,{rideId:ride.id,driverId:ride.driverId!,grossFareMinor:gross,appliedDiscountMinor:discount,riderCashDueMinor:gross-discount,driverHebirCreditMinor:discount})); if(discount>0) await em.save(em.create(DriverWalletEntry,{driverId:ride.driverId!,rideId:ride.id,amountMinor:discount,type:'ad_discount_credit'})); return settled; }
- async walletSummary(driverId:string) { const entries=await this.wallet.find({where:{driverId},order:{createdAt:'DESC'}}); const cashouts=await this.cashouts.find({where:{driverId},order:{createdAt:'DESC'}}); const available=entries.reduce((n,e)=>n+e.amountMinor,0); const pending=cashouts.filter(x=>[CashoutState.REQUESTED,CashoutState.PROCESSING].includes(x.state)).reduce((n,x)=>n+x.amountMinor,0); return {availableMinor:Math.max(0,available-pending),pendingMinor:pending,entries,cashouts}; }
- async listCampaigns() { return this.campaigns.find({order:{updatedAt:'DESC'}}); }
- async listCashouts() { return this.cashouts.find({order:{createdAt:'DESC'}}); }
- async requestCashout(driverId:string,amountMinor:number) { return this.wallet.manager.transaction(async em=>{ const entries=await em.find(DriverWalletEntry,{where:{driverId},lock:{mode:'pessimistic_write'}}); const requests=await em.find(DriverCashoutRequest,{where:{driverId},lock:{mode:'pessimistic_write'}}); const balance=entries.reduce((n,e)=>n+e.amountMinor,0)-requests.filter(x=>[CashoutState.REQUESTED,CashoutState.PROCESSING].includes(x.state)).reduce((n,x)=>n+x.amountMinor,0); if(amountMinor>balance) throw new ConflictException('Insufficient available wallet balance'); return em.save(em.create(DriverCashoutRequest,{driverId,amountMinor,state:CashoutState.REQUESTED})); }); }
- async upsertCampaign(id:string|undefined,data:Partial<AdCampaign>,actor:string) { if(id) { const c=await this.campaigns.findOneBy({id}); if(!c) throw new NotFoundException('Campaign not found'); const clean=Object.fromEntries(Object.entries(data).filter(([,v])=>v!==undefined)); return this.campaigns.save({...c,...clean,updatedBy:actor}); } return this.campaigns.save(this.campaigns.create({...data,slug:`campaign-${randomBytes(8).toString('hex')}`,createdBy:actor,updatedBy:actor})); }
- async reviewCashout(id:string,state:CashoutState,actor:string,paymentReference?:string,reviewNote?:string) { if(![CashoutState.PROCESSING,CashoutState.PAID,CashoutState.REJECTED,CashoutState.FAILED].includes(state)) throw new BadRequestException('Invalid cashout review state'); return this.cashouts.manager.transaction(async em=>{const c=await em.findOne(DriverCashoutRequest,{where:{id},lock:{mode:'pessimistic_write'}});if(!c)throw new NotFoundException('Cashout not found'); if([CashoutState.PAID,CashoutState.REJECTED,CashoutState.FAILED].includes(c.state)) throw new ConflictException('Cashout is final'); if(state===CashoutState.PAID&&!paymentReference) throw new BadRequestException('A payment reference is required to mark a cashout paid'); const result=await em.save(DriverCashoutRequest,{...c,state,reviewedBy:actor,paymentReference:paymentReference??c.paymentReference,reviewNote:reviewNote??c.reviewNote}); if(state===CashoutState.PAID) await em.save(em.create(DriverWalletEntry,{driverId:c.driverId,cashoutId:c.id,amountMinor:-c.amountMinor,type:'cashout_paid'})); return result;}); }
+  constructor(
+    @InjectRepository(AdCampaign) private campaigns: Repository<AdCampaign>,
+    @InjectRepository(RiderAdProfile)
+    private profiles: Repository<RiderAdProfile>,
+    @InjectRepository(AdViewSession)
+    private sessions: Repository<AdViewSession>,
+    @InjectRepository(AdRewardEvent) private rewards: Repository<AdRewardEvent>,
+    @InjectRepository(RideAdSettlement)
+    private settlements: Repository<RideAdSettlement>,
+    @InjectRepository(DriverWalletEntry)
+    private wallet: Repository<DriverWalletEntry>,
+    @InjectRepository(DriverCashoutRequest)
+    private cashouts: Repository<DriverCashoutRequest>,
+    @InjectRepository(Ride) private rides: Repository<Ride>,
+  ) {}
+  async profile(riderId: string) {
+    return this.profiles.findOne({ where: { riderId } });
+  }
+  async updateProfile(riderId: string, data: Partial<RiderAdProfile>) {
+    const old = await this.profile(riderId);
+    const consented = !!data.consented;
+    return this.profiles.save(
+      this.profiles.create({
+        ...old,
+        ...data,
+        riderId,
+        consented,
+        consentVersion: consented
+          ? (data.consentVersion ?? old?.consentVersion ?? 'v1')
+          : (old?.consentVersion ?? null),
+        consentedAt: consented
+          ? (old?.consentedAt ?? new Date())
+          : (old?.consentedAt ?? null),
+        withdrawnAt: consented ? null : new Date(),
+      }),
+    );
+  }
+  private async eligible(rideId: string, riderId: string) {
+    const ride = await this.rides.findOne({ where: { id: rideId } });
+    if (!ride) throw new NotFoundException('Ride not found');
+    if (ride.riderId !== riderId)
+      throw new ForbiddenException('Ride does not belong to rider');
+    if (ride.status !== RideStatus.IN_PROGRESS)
+      throw new ConflictException(
+        'Sponsored rewards are only available during an in-progress trip',
+      );
+    const p = await this.profile(riderId);
+    if (!p?.consented || !ADULT.has(p.ageBand))
+      throw new ForbiddenException(
+        'Rider is not eligible for sponsored rewards',
+      );
+    return { ride, p };
+  }
+  async availability(rideId: string, riderId: string) {
+    const { p } = await this.eligible(rideId, riderId);
+    const rewardCount = await this.rewards.count({ where: { rideId } });
+    if (rewardCount >= MAX_REWARDS)
+      return {
+        available: false,
+        reason: 'trip_limit',
+        earnedMinor: rewardCount * ETB3,
+        remaining: 0,
+      };
+    const now = new Date();
+    const done = (await this.rewards.find({ where: { riderId } })).map(
+      (x) => x.campaignId,
+    );
+    const all = await this.campaigns.find({
+      where: { state: CampaignState.ACTIVE },
+    });
+    const candidates = all.filter(
+      (c) =>
+        c.startsAt <= now &&
+        c.endsAt > now &&
+        Number(c.budgetMinor) - Number(c.reservedMinor) >= ETB3 &&
+        c.ageBands.includes(p.ageBand) &&
+        c.workCategories.includes(p.workCategory) &&
+        !done.includes(c.id),
+    );
+    if (!candidates.length)
+      return {
+        available: false,
+        reason: 'no_inventory',
+        earnedMinor: rewardCount * ETB3,
+        remaining: MAX_REWARDS - rewardCount,
+      };
+    const total = candidates.reduce((n, c) => n + c.deliveryWeight, 0);
+    let pick = Math.random() * total;
+    const campaign =
+      candidates.find((c) => (pick -= c.deliveryWeight) <= 0) ?? candidates[0];
+    return {
+      available: true,
+      earnedMinor: rewardCount * ETB3,
+      remaining: MAX_REWARDS - rewardCount,
+      campaign: this.creative(campaign),
+    };
+  }
+  private creative(c: AdCampaign) {
+    return {
+      id: c.id,
+      sponsorName: c.sponsorName,
+      title: c.title,
+      message: c.message,
+      assetUrl: c.assetUrl,
+      ctaLabel: c.ctaLabel,
+      ctaUrl: c.ctaUrl,
+      requiredViewSeconds: c.requiredViewSeconds,
+      rewardMinor: ETB3,
+    };
+  }
+  async start(rideId: string, riderId: string) {
+    const availability = await this.availability(rideId, riderId);
+    if (!availability.available) return availability;
+    const active = await this.sessions.findOne({
+      where: { riderId, state: ViewState.STARTED },
+    });
+    if (active) {
+      await this.sessions.update(active.id, { state: ViewState.EXPIRED });
+    }
+    const raw = randomBytes(32).toString('base64url');
+    const c = availability.campaign!;
+    const session = await this.sessions.save(
+      this.sessions.create({
+        riderId,
+        rideId,
+        campaignId: c.id,
+        tokenHash: tokenHash(raw),
+        requiredViewSeconds: c.requiredViewSeconds,
+        expiresAt: new Date(Date.now() + (c.requiredViewSeconds + 300) * 1000),
+        lastHeartbeatAt: new Date(),
+      }),
+    );
+    return {
+      available: true,
+      sessionId: session.id,
+      token: raw,
+      campaign: c,
+      requiredViewSeconds: session.requiredViewSeconds,
+    };
+  }
+  async heartbeat(
+    sessionId: string,
+    riderId: string,
+    token: string,
+    sequence: number,
+    visibleSeconds: number,
+    videoPlaying = true,
+  ) {
+    const s = await this.sessions.findOne({
+      where: { id: sessionId, riderId },
+    });
+    if (!s || s.tokenHash !== tokenHash(token))
+      throw new ForbiddenException('Invalid viewing session');
+    if (s.state !== ViewState.STARTED || s.expiresAt <= new Date())
+      throw new ConflictException('Viewing session has expired');
+    await this.eligible(s.rideId, riderId);
+    if (sequence <= s.lastSequence)
+      throw new ConflictException('Heartbeat replayed');
+    const elapsed = (Date.now() - s.lastHeartbeatAt.getTime()) / 1000;
+    if (visibleSeconds > Math.ceil(elapsed) + 2)
+      throw new BadRequestException('Impossible viewing progress');
+    const increment = videoPlaying
+      ? Math.min(visibleSeconds, Math.ceil(elapsed))
+      : 0;
+    s.lastSequence = sequence;
+    s.verifiedSeconds = Math.min(
+      s.requiredViewSeconds,
+      s.verifiedSeconds + increment,
+    );
+    s.lastHeartbeatAt = new Date();
+    await this.sessions.save(s);
+    return {
+      verifiedSeconds: s.verifiedSeconds,
+      requiredViewSeconds: s.requiredViewSeconds,
+      ready: s.verifiedSeconds >= s.requiredViewSeconds,
+    };
+  }
+  async complete(sessionId: string, riderId: string, token: string) {
+    return this.sessions.manager.transaction(async (em) => {
+      const s = await em.findOne(AdViewSession, {
+        where: { id: sessionId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!s || s.riderId !== riderId || s.tokenHash !== tokenHash(token))
+        throw new ForbiddenException('Invalid viewing session');
+      const existing = await em.findOne(AdRewardEvent, {
+        where: { sessionId },
+      });
+      if (existing) return this.rewardResult(em, s.rideId, existing);
+      if (
+        s.state !== ViewState.STARTED ||
+        s.expiresAt <= new Date() ||
+        s.verifiedSeconds < Math.max(1, s.requiredViewSeconds - 1)
+      )
+        throw new ConflictException('Viewing duration has not been verified');
+      const ride = await em.findOne(Ride, {
+        where: { id: s.rideId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (
+        !ride ||
+        ride.riderId !== riderId ||
+        ride.status !== RideStatus.IN_PROGRESS
+      )
+        throw new ConflictException('Trip is no longer eligible');
+      const p = await em.findOne(RiderAdProfile, {
+        where: { riderId },
+        lock: { mode: 'pessimistic_read' },
+      });
+      if (!p?.consented || !ADULT.has(p.ageBand))
+        throw new ForbiddenException('Consent is no longer active');
+      const duplicate = await em.findOne(AdRewardEvent, {
+        where: { riderId, campaignId: s.campaignId },
+        lock: { mode: 'pessimistic_read' },
+      });
+      if (duplicate) {
+        await em.update(AdViewSession, s.id, {
+          state: ViewState.COMPLETED,
+          completedAt: new Date(),
+        });
+        return this.rewardResult(em, s.rideId, duplicate);
+      }
+      const count = await em.count(AdRewardEvent, {
+        where: { rideId: s.rideId },
+      });
+      if (count >= MAX_REWARDS)
+        throw new ConflictException('Trip reward limit reached');
+      const campaign = await em.findOne(AdCampaign, {
+        where: { id: s.campaignId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (
+        !campaign ||
+        campaign.state !== CampaignState.ACTIVE ||
+        Number(campaign.budgetMinor) - Number(campaign.reservedMinor) < ETB3
+      )
+        throw new ConflictException('Campaign budget exhausted');
+      await em.increment(
+        AdCampaign,
+        { id: campaign.id },
+        'reservedMinor',
+        ETB3,
+      );
+      await em.update(AdViewSession, s.id, {
+        state: ViewState.COMPLETED,
+        completedAt: new Date(),
+      });
+      const reward = await em.save(
+        em.create(AdRewardEvent, {
+          riderId,
+          rideId: s.rideId,
+          campaignId: s.campaignId,
+          sessionId: s.id,
+          rewardMinor: ETB3,
+        }),
+      );
+      return this.rewardResult(em, s.rideId, reward);
+    });
+  }
+  private async rewardResult(
+    em: EntityManager,
+    rideId: string,
+    reward: AdRewardEvent,
+  ) {
+    const count = await em.count(AdRewardEvent, { where: { rideId } });
+    return {
+      rewardId: reward.id,
+      earnedMinor: count * ETB3,
+      remaining: Math.max(0, MAX_REWARDS - count),
+    };
+  }
+  async savings(rideId: string, riderId: string) {
+    await this.eligible(rideId, riderId);
+    const n = await this.rewards.count({ where: { rideId } });
+    return {
+      earnedMinor: n * ETB3,
+      rewardCount: n,
+      remaining: MAX_REWARDS - n,
+    };
+  }
+  async settleRide(em: EntityManager, ride: Ride, grossFareEtb: string) {
+    const old = await em.findOne(RideAdSettlement, {
+      where: { rideId: ride.id },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (old) return old;
+    const rewards = await em.count(AdRewardEvent, {
+      where: { rideId: ride.id },
+    });
+    const gross = Math.max(0, Math.round(Number(grossFareEtb) * 100));
+    const discount = Math.min(gross, rewards * ETB3, 1500);
+    const settled = await em.save(
+      em.create(RideAdSettlement, {
+        rideId: ride.id,
+        driverId: ride.driverId!,
+        grossFareMinor: gross,
+        appliedDiscountMinor: discount,
+        riderCashDueMinor: gross - discount,
+        driverHebirCreditMinor: discount,
+      }),
+    );
+    if (discount > 0)
+      await em.save(
+        em.create(DriverWalletEntry, {
+          driverId: ride.driverId!,
+          rideId: ride.id,
+          amountMinor: discount,
+          type: 'ad_discount_credit',
+        }),
+      );
+    return settled;
+  }
+  async walletSummary(driverId: string) {
+    const entries = await this.wallet.find({
+      where: { driverId },
+      order: { createdAt: 'DESC' },
+    });
+    const cashouts = await this.cashouts.find({
+      where: { driverId },
+      order: { createdAt: 'DESC' },
+    });
+    const available = entries.reduce((n, e) => n + e.amountMinor, 0);
+    const pending = cashouts
+      .filter((x) =>
+        [CashoutState.REQUESTED, CashoutState.PROCESSING].includes(x.state),
+      )
+      .reduce((n, x) => n + x.amountMinor, 0);
+    return {
+      availableMinor: Math.max(0, available - pending),
+      pendingMinor: pending,
+      entries,
+      cashouts,
+    };
+  }
+  async listCampaigns() {
+    return this.campaigns.find({ order: { updatedAt: 'DESC' } });
+  }
+  async listCashouts() {
+    return this.cashouts.find({ order: { createdAt: 'DESC' } });
+  }
+  async requestCashout(driverId: string, amountMinor: number) {
+    return this.wallet.manager.transaction(async (em) => {
+      const entries = await em.find(DriverWalletEntry, {
+        where: { driverId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      const requests = await em.find(DriverCashoutRequest, {
+        where: { driverId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      const balance =
+        entries.reduce((n, e) => n + e.amountMinor, 0) -
+        requests
+          .filter((x) =>
+            [CashoutState.REQUESTED, CashoutState.PROCESSING].includes(x.state),
+          )
+          .reduce((n, x) => n + x.amountMinor, 0);
+      if (amountMinor > balance)
+        throw new ConflictException('Insufficient available wallet balance');
+      return em.save(
+        em.create(DriverCashoutRequest, {
+          driverId,
+          amountMinor,
+          state: CashoutState.REQUESTED,
+        }),
+      );
+    });
+  }
+  async upsertCampaign(
+    id: string | undefined,
+    data: Partial<AdCampaign>,
+    actor: string,
+  ) {
+    if (id) {
+      const c = await this.campaigns.findOneBy({ id });
+      if (!c) throw new NotFoundException('Campaign not found');
+      const clean = Object.fromEntries(
+        Object.entries(data).filter(([, v]) => v !== undefined),
+      );
+      return this.campaigns.save({ ...c, ...clean, updatedBy: actor });
+    }
+    return this.campaigns.save(
+      this.campaigns.create({
+        ...data,
+        slug: `campaign-${randomBytes(8).toString('hex')}`,
+        createdBy: actor,
+        updatedBy: actor,
+      }),
+    );
+  }
+  async reviewCashout(
+    id: string,
+    state: CashoutState,
+    actor: string,
+    paymentReference?: string,
+    reviewNote?: string,
+  ) {
+    if (
+      ![
+        CashoutState.PROCESSING,
+        CashoutState.PAID,
+        CashoutState.REJECTED,
+        CashoutState.FAILED,
+      ].includes(state)
+    )
+      throw new BadRequestException('Invalid cashout review state');
+    return this.cashouts.manager.transaction(async (em) => {
+      const c = await em.findOne(DriverCashoutRequest, {
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!c) throw new NotFoundException('Cashout not found');
+      if (
+        [
+          CashoutState.PAID,
+          CashoutState.REJECTED,
+          CashoutState.FAILED,
+        ].includes(c.state)
+      )
+        throw new ConflictException('Cashout is final');
+      if (state === CashoutState.PAID && !paymentReference)
+        throw new BadRequestException(
+          'A payment reference is required to mark a cashout paid',
+        );
+      const result = await em.save(DriverCashoutRequest, {
+        ...c,
+        state,
+        reviewedBy: actor,
+        paymentReference: paymentReference ?? c.paymentReference,
+        reviewNote: reviewNote ?? c.reviewNote,
+      });
+      if (state === CashoutState.PAID)
+        await em.save(
+          em.create(DriverWalletEntry, {
+            driverId: c.driverId,
+            cashoutId: c.id,
+            amountMinor: -c.amountMinor,
+            type: 'cashout_paid',
+          }),
+        );
+      return result;
+    });
+  }
 }

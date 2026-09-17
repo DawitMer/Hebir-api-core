@@ -1,8 +1,30 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 
-export enum CampaignState { DRAFT = 'draft', ACTIVE = 'active', PAUSED = 'paused', ENDED = 'ended' }
-export enum ViewState { STARTED = 'started', COMPLETED = 'completed', EXPIRED = 'expired' }
-export enum CashoutState { REQUESTED = 'requested', PROCESSING = 'processing', PAID = 'paid', REJECTED = 'rejected', FAILED = 'failed' }
+export enum CampaignState {
+  DRAFT = 'draft',
+  ACTIVE = 'active',
+  PAUSED = 'paused',
+  ENDED = 'ended',
+}
+export enum ViewState {
+  STARTED = 'started',
+  COMPLETED = 'completed',
+  EXPIRED = 'expired',
+}
+export enum CashoutState {
+  REQUESTED = 'requested',
+  PROCESSING = 'processing',
+  PAID = 'paid',
+  REJECTED = 'rejected',
+  FAILED = 'failed',
+}
 
 @Entity('ad_campaigns')
 export class AdCampaign {
@@ -11,12 +33,17 @@ export class AdCampaign {
   @Column({ length: 120 }) sponsorName: string;
   @Column({ length: 160 }) title: string;
   @Column({ type: 'text' }) message: string;
-  @Column({ type: 'varchar', length: 2048, nullable: true }) assetUrl: string | null;
-  @Column({ type: 'varchar', length: 80, nullable: true }) ctaLabel: string | null;
-  @Column({ type: 'varchar', length: 2048, nullable: true }) ctaUrl: string | null;
+  @Column({ type: 'varchar', length: 2048, nullable: true }) assetUrl:
+    string | null;
+  @Column({ type: 'varchar', length: 80, nullable: true }) ctaLabel:
+    string | null;
+  @Column({ type: 'varchar', length: 2048, nullable: true }) ctaUrl:
+    string | null;
   @Column({ type: 'varchar', array: true, default: '{}' }) ageBands: string[];
-  @Column({ type: 'varchar', array: true, default: '{}' }) workCategories: string[];
-  @Column({ type: 'enum', enum: CampaignState, default: CampaignState.DRAFT }) state: CampaignState;
+  @Column({ type: 'varchar', array: true, default: '{}' })
+  workCategories: string[];
+  @Column({ type: 'enum', enum: CampaignState, default: CampaignState.DRAFT })
+  state: CampaignState;
   @Column({ type: 'timestamptz' }) startsAt: Date;
   @Column({ type: 'timestamptz' }) endsAt: Date;
   @Column({ type: 'int', default: 15 }) requiredViewSeconds: number;
@@ -49,25 +76,69 @@ export class RiderAdProfile {
 @Index(['riderId', 'state'])
 export class AdViewSession {
   @PrimaryGeneratedColumn('uuid') id: string;
-  @Column({ type: 'uuid' }) riderId: string; @Column({ type: 'uuid' }) rideId: string; @Column({ type: 'uuid' }) campaignId: string;
-  @Column({ length: 128 }) tokenHash: string; @Column({ type: 'enum', enum: ViewState, default: ViewState.STARTED }) state: ViewState;
-  @Column({ type: 'int' }) requiredViewSeconds: number; @Column({ type: 'int', default: 0 }) verifiedSeconds: number; @Column({ type: 'int', default: 0 }) lastSequence: number;
-  @Column({ type: 'timestamptz' }) expiresAt: Date; @Column({ type: 'timestamptz' }) lastHeartbeatAt: Date; @Column({ type: 'timestamptz', nullable: true }) completedAt: Date | null;
+  @Column({ type: 'uuid' }) riderId: string;
+  @Column({ type: 'uuid' }) rideId: string;
+  @Column({ type: 'uuid' }) campaignId: string;
+  @Column({ length: 128 }) tokenHash: string;
+  @Column({ type: 'enum', enum: ViewState, default: ViewState.STARTED })
+  state: ViewState;
+  @Column({ type: 'int' }) requiredViewSeconds: number;
+  @Column({ type: 'int', default: 0 }) verifiedSeconds: number;
+  @Column({ type: 'int', default: 0 }) lastSequence: number;
+  @Column({ type: 'timestamptz' }) expiresAt: Date;
+  @Column({ type: 'timestamptz' }) lastHeartbeatAt: Date;
+  @Column({ type: 'timestamptz', nullable: true }) completedAt: Date | null;
   @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date;
 }
 
 @Entity('ad_reward_events')
 @Index(['riderId', 'campaignId'], { unique: true })
 @Index(['sessionId'], { unique: true })
-export class AdRewardEvent { @PrimaryGeneratedColumn('uuid') id: string; @Column({ type: 'uuid' }) riderId: string; @Column({ type: 'uuid' }) rideId: string; @Column({ type: 'uuid' }) campaignId: string; @Column({ type: 'uuid' }) sessionId: string; @Column({ type: 'int' }) rewardMinor: number; @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date; }
+export class AdRewardEvent {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) riderId: string;
+  @Column({ type: 'uuid' }) rideId: string;
+  @Column({ type: 'uuid' }) campaignId: string;
+  @Column({ type: 'uuid' }) sessionId: string;
+  @Column({ type: 'int' }) rewardMinor: number;
+  @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date;
+}
 
 @Entity('ride_ad_settlements')
 @Index(['rideId'], { unique: true })
-export class RideAdSettlement { @PrimaryGeneratedColumn('uuid') id: string; @Column({ type: 'uuid' }) rideId: string; @Column({ type: 'uuid' }) driverId: string; @Column({ type: 'int' }) grossFareMinor: number; @Column({ type: 'int', default: 0 }) appliedDiscountMinor: number; @Column({ type: 'int' }) riderCashDueMinor: number; @Column({ type: 'int', default: 0 }) driverHebirCreditMinor: number; @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date; }
+export class RideAdSettlement {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) rideId: string;
+  @Column({ type: 'uuid' }) driverId: string;
+  @Column({ type: 'int' }) grossFareMinor: number;
+  @Column({ type: 'int', default: 0 }) appliedDiscountMinor: number;
+  @Column({ type: 'int' }) riderCashDueMinor: number;
+  @Column({ type: 'int', default: 0 }) driverHebirCreditMinor: number;
+  @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date;
+}
 
 @Entity('driver_wallet_entries')
 @Index(['rideId'], { unique: true, where: '"rideId" IS NOT NULL' })
-export class DriverWalletEntry { @PrimaryGeneratedColumn('uuid') id: string; @Column({ type: 'uuid' }) driverId: string; @Column({ type: 'uuid', nullable: true }) rideId: string | null; @Column({ type: 'uuid', nullable: true }) cashoutId: string | null; @Column({ type: 'int' }) amountMinor: number; @Column({ length: 24 }) type: string; @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date; }
+export class DriverWalletEntry {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) driverId: string;
+  @Column({ type: 'uuid', nullable: true }) rideId: string | null;
+  @Column({ type: 'uuid', nullable: true }) cashoutId: string | null;
+  @Column({ type: 'int' }) amountMinor: number;
+  @Column({ length: 24 }) type: string;
+  @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date;
+}
 
 @Entity('driver_cashout_requests')
-export class DriverCashoutRequest { @PrimaryGeneratedColumn('uuid') id: string; @Column({ type: 'uuid' }) driverId: string; @Column({ type: 'int' }) amountMinor: number; @Column({ type: 'enum', enum: CashoutState, default: CashoutState.REQUESTED }) state: CashoutState; @Column({ length: 128, nullable: true }) paymentReference: string | null; @Column({ type: 'uuid', nullable: true }) reviewedBy: string | null; @Column({ type: 'text', nullable: true }) reviewNote: string | null; @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date; @UpdateDateColumn({ type: 'timestamptz' }) updatedAt: Date; }
+export class DriverCashoutRequest {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) driverId: string;
+  @Column({ type: 'int' }) amountMinor: number;
+  @Column({ type: 'enum', enum: CashoutState, default: CashoutState.REQUESTED })
+  state: CashoutState;
+  @Column({ length: 128, nullable: true }) paymentReference: string | null;
+  @Column({ type: 'uuid', nullable: true }) reviewedBy: string | null;
+  @Column({ type: 'text', nullable: true }) reviewNote: string | null;
+  @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date;
+  @UpdateDateColumn({ type: 'timestamptz' }) updatedAt: Date;
+}

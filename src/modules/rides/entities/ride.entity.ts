@@ -126,6 +126,21 @@ export class Ride {
   @Column({ type: 'varchar', length: 64, nullable: true })
   pricingVersion: string | null;
 
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  cancellationType: string | null;
+
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  cancellationReason: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  cancelledBy: string | null;
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  cancelledByRole: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  adminNotes: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

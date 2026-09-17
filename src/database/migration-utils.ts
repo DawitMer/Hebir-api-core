@@ -8,8 +8,13 @@ import { QueryRunner } from 'typeorm';
 export async function bootstrappedFromBaseline(
   queryRunner: QueryRunner,
 ): Promise<boolean> {
-  const rows: Array<{ t: string | null }> = await queryRunner.query(
+  const reg: Array<{ t: string | null }> = await queryRunner.query(
     "SELECT to_regclass('public.schema_bootstrap') AS t",
   );
-  return Boolean(rows[0]?.t);
+  if (!reg[0]?.t) return false;
+  const rows: Array<{ cnt: string }> = await queryRunner.query(
+    'SELECT count(*)::text AS cnt FROM public.schema_bootstrap WHERE id = 1',
+  );
+  return Number(rows[0]?.cnt ?? 0) > 0;
 }
+

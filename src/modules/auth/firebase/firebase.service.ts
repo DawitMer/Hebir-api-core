@@ -46,11 +46,14 @@ export class FirebaseService implements OnModuleInit {
     }
 
     if (typeof this.getFirebaseAuth !== 'function') {
-      this.logger.warn('firebase-admin Auth API is not available in this environment');
+      this.logger.warn(
+        'firebase-admin Auth API is not available in this environment',
+      );
       return;
     }
 
-    const existingApps = this.firebaseAdmin.getApps?.() ?? this.firebaseAdmin.apps ?? [];
+    const existingApps =
+      this.firebaseAdmin.getApps?.() ?? this.firebaseAdmin.apps ?? [];
     if (existingApps.length > 0) {
       this.firebaseApp = existingApps[0];
       this.initialized = true;
@@ -158,10 +161,9 @@ export class FirebaseService implements OnModuleInit {
     }
 
     try {
-      const decoded = await this.getFirebaseAuth(this.firebaseApp).verifyIdToken(
-        idToken,
-        true,
-      );
+      const decoded = await this.getFirebaseAuth(
+        this.firebaseApp,
+      ).verifyIdToken(idToken, true);
 
       if (!decoded.phone_number) {
         throw new UnauthorizedException(
