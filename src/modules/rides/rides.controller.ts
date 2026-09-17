@@ -86,7 +86,18 @@ export class RidesController {
   /** Live trip for this user (resume after app kill / leave mid-trip). */
   @UseGuards(JwtAuthGuard)
   @Get('active')
-  async getActive(@CurrentUser() user: AuthedUser) {
+  async getActive(
+    @CurrentUser() user: AuthedUser,
+    @Query('role') role?: string,
+  ) {
+    if (role === 'driver') {
+      return (
+        (await this.ridesService.getActiveRideForDriver(user.userId)) ?? {}
+      );
+    }
+    if (role === 'rider') {
+      return (await this.ridesService.getActiveRideForRider(user.userId)) ?? {};
+    }
     return (
       (await this.ridesService.getActiveRideForUser(
         user.userId,

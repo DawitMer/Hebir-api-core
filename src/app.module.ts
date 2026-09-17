@@ -29,6 +29,7 @@ import {
 } from './observability/request-context';
 import { LocationSvcModule } from './common/location-svc/location-svc.module';
 import { GeocodingModule } from './common/geocoding/geocoding.module';
+import { AdsModule } from './modules/ads/ads.module';
 
 @Module({
   imports: [
@@ -91,6 +92,7 @@ import { GeocodingModule } from './common/geocoding/geocoding.module';
     RateLimitModule,
     LocationSvcModule,
     GeocodingModule,
+    AdsModule,
     AuthModule,
     UsersModule,
     AdminModule,

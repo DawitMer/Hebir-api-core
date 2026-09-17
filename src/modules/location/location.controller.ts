@@ -392,19 +392,30 @@ export class LocationController {
     const limit = Number.isFinite(Number(limitRaw))
       ? Math.min(48, Math.max(1, Math.floor(Number(limitRaw))))
       : 24;
-    if (!this.locationSvc.enabled || this.locationSvc.isOpen) {
-      throw new ServiceUnavailableException('location-svc unavailable');
+    let res: { drivers?: any[]; limit?: number } | null = null;
+    if (this.locationSvc.enabled && !this.locationSvc.isOpen) {
+      try {
+        res = (await this.locationSvc.get(
+          '/drivers/locations',
+          {
+            lat,
+            lng,
+            radiusKm,
+            limit,
+          },
+          2500,
+        )) as { drivers?: any[]; limit?: number };
+      } catch {
+        res = null;
+      }
     }
-    return this.locationSvc.get(
-      '/drivers/locations',
-      {
-        lat,
-        lng,
-        radiusKm,
-        limit,
-      },
-      2500,
-    );
+
+    if (res?.drivers && res.drivers.length > 0) {
+      return res;
+    }
+
+    // Return empty list — never fall back to simulated/demo drivers.
+    return { drivers: [], limit };
   }
 
   @UseGuards(JwtAuthGuard)

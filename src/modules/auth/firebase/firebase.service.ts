@@ -20,6 +20,7 @@ export interface VerifiedFirebaseToken {
 export class FirebaseService implements OnModuleInit {
   private readonly logger = new Logger(FirebaseService.name);
   private firebaseAdmin: any = null;
+  private getFirebaseAuth: ((app?: unknown) => any) | null = null;
   private firebaseApp: any = null;
   private initialized = false;
 
@@ -34,13 +35,24 @@ export class FirebaseService implements OnModuleInit {
       // Use CommonJS require to maintain maximum compatibility across Node.js & Jest
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       this.firebaseAdmin = require('firebase-admin');
+      // firebase-admin v14 exposes Auth through the modular entry point rather
+      // than `firebaseAdmin.auth()`. Keep the legacy fallback for older SDKs.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const firebaseAuth = require('firebase-admin/auth');
+      this.getFirebaseAuth = firebaseAuth.getAuth ?? this.firebaseAdmin.auth;
     } catch {
       this.logger.warn('firebase-admin package not loaded in this environment');
       return;
     }
 
-    if (this.firebaseAdmin.apps && this.firebaseAdmin.apps.length > 0) {
-      this.firebaseApp = this.firebaseAdmin.apps[0];
+    if (typeof this.getFirebaseAuth !== 'function') {
+      this.logger.warn('firebase-admin Auth API is not available in this environment');
+      return;
+    }
+
+    const existingApps = this.firebaseAdmin.getApps?.() ?? this.firebaseAdmin.apps ?? [];
+    if (existingApps.length > 0) {
+      this.firebaseApp = existingApps[0];
       this.initialized = true;
       this.logger.log('Using existing Firebase Admin app initialization');
       return;
@@ -139,16 +151,17 @@ export class FirebaseService implements OnModuleInit {
       };
     }
 
-    if (!this.initialized || !this.firebaseApp) {
+    if (!this.initialized || !this.firebaseApp || !this.getFirebaseAuth) {
       throw new UnauthorizedException(
         'Firebase authentication service is temporarily unavailable',
       );
     }
 
     try {
-      const decoded = await this.firebaseAdmin
-        .auth(this.firebaseApp)
-        .verifyIdToken(idToken, true);
+      const decoded = await this.getFirebaseAuth(this.firebaseApp).verifyIdToken(
+        idToken,
+        true,
+      );
 
       if (!decoded.phone_number) {
         throw new UnauthorizedException(

@@ -8,6 +8,7 @@ import { FareRecord } from '../rides/entities/fare-record.entity';
 import { DriverVerification } from '../kyc/entities/driver-verification.entity';
 import { AuditTrail } from '../kyc/entities/audit-trail.entity';
 import { DriverExpense } from '../gov/entities/driver-expense.entity';
+import { DriverMonthlyExpenseReport } from '../gov/entities/driver-monthly-expense-report.entity';
 import { DriverLocationHistory } from '../location/entities/driver-location-history.entity';
 import { IncidentsModule } from '../incidents/incidents.module';
 import { RidesModule } from '../rides/rides.module';
@@ -25,6 +26,7 @@ import { AdminService } from './admin.service';
       DriverVerification,
       AuditTrail,
       DriverExpense,
+      DriverMonthlyExpenseReport,
       DriverLocationHistory,
     ]),
     IncidentsModule,

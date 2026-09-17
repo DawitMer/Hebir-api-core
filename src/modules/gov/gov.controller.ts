@@ -28,6 +28,10 @@ const EXPENSE_REVIEW_STATUSES = new Set([
   'verified',
   'flagged',
   'rejected',
+  'approved',
+  'changes_required',
+  'under_review',
+  'submitted',
 ]);
 
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -87,6 +91,9 @@ export class GovController {
   async listExpenses(
     @CurrentUser() user: { userId: string },
     @Req() req: Request,
+    @Query('status') status?: string,
+    @Query('month') month?: string,
+    @Query('search') search?: string,
     @Query('limit') limit?: string,
   ) {
     await this.govService.recordAccess(
@@ -95,13 +102,33 @@ export class GovController {
       undefined,
       clientIp(req),
     );
-    return this.govService.listAllExpenses(limit ? Number(limit) : 300);
+    return this.govService.listAllExpenses({
+      status,
+      month,
+      search,
+      limit: limit ? Number(limit) : 300,
+    });
+  }
+
+  @Get('expenses/:id')
+  async getExpense(
+    @Param('id') id: string,
+    @CurrentUser() user: { userId: string },
+    @Req() req: Request,
+  ) {
+    await this.govService.recordAccess(
+      user.userId,
+      'expense-detail',
+      id,
+      clientIp(req),
+    );
+    return this.govService.getMonthlyReportById(id);
   }
 
   @Patch('expenses/:id/status')
   async setExpenseStatus(
     @Param('id') id: string,
-    @Body() body: { status?: string },
+    @Body() body: { status?: string; reviewerNotes?: string; notes?: string },
     @CurrentUser() user: { userId: string },
     @Req() req: Request,
   ) {
@@ -111,13 +138,19 @@ export class GovController {
         `status must be one of: ${[...EXPENSE_REVIEW_STATUSES].join(', ')}`,
       );
     }
+    const reviewerNotes = body?.reviewerNotes?.trim() || body?.notes?.trim();
     await this.govService.recordAccess(
       user.userId,
       `expense-${status}`,
       id,
       clientIp(req),
     );
-    return this.govService.setExpenseReviewStatus(id, status);
+    return this.govService.setExpenseReviewStatus(
+      id,
+      status,
+      user.userId,
+      reviewerNotes,
+    );
   }
 
   @Get('access-log')

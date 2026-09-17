@@ -78,10 +78,10 @@ async function downloadConfig(token, resourceName) {
 }
 
 const APPS = [
-  { platform: 'android', packageName: 'com.hebir.hebir_rider', displayName: 'Hebir Rider' },
-  { platform: 'android', packageName: 'com.hebir.hebir_driver', displayName: 'Hebir Driver' },
-  { platform: 'ios', bundleId: 'com.hebir.hebirRider', displayName: 'Hebir Rider iOS' },
-  { platform: 'ios', bundleId: 'com.hebir.hebirDriver', displayName: 'Hebir Driver iOS' },
+  { platform: 'android', packageName: 'com.hebirtaxi.rider', displayName: 'Hebir Taxi Rider' },
+  { platform: 'android', packageName: 'com.hebirtaxi.driver', displayName: 'Hebir Taxi Driver' },
+  { platform: 'ios', bundleId: 'com.hebirtaxi.rider', displayName: 'Hebir Taxi Rider iOS' },
+  { platform: 'ios', bundleId: 'com.hebirtaxi.driver', displayName: 'Hebir Taxi Driver iOS' },
 ];
 
 (async () => {

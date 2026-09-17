@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Get,
@@ -9,7 +8,6 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { IsBoolean, IsOptional, IsString } from 'class-validator';
 import { AdminService } from './admin.service';
 import { RidesService } from '../rides/rides.service';
@@ -35,7 +33,6 @@ class SuspendDriverDto {
 export class AdminController {
   constructor(
     private readonly admin: AdminService,
-    private readonly config: ConfigService,
     private readonly rides: RidesService,
   ) {}
 
@@ -95,14 +92,5 @@ export class AdminController {
   @Get('operations/live')
   liveOps() {
     return this.admin.getLiveOperations();
-  }
-
-  /** Idempotent demo rows for portals (KYC queue + sample expenses). */
-  @Post('bootstrap-demo')
-  bootstrapDemo() {
-    if (this.config.get<string>('NODE_ENV') === 'production') {
-      throw new BadRequestException('bootstrap-demo disabled in production');
-    }
-    return this.admin.bootstrapDemo();
   }
 }

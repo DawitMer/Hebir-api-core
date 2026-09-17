@@ -204,13 +204,7 @@ async function main() {
     { fullName: 'Gov Officer', username: 'gov_officer' },
     { headers: { Authorization: `Bearer ${gov.accessToken}` } },
   );
-  const { data: boot } = await axios.post(
-    `${API}/admin/bootstrap-demo`,
-    {},
-    { headers: { Authorization: `Bearer ${admin.accessToken}` } },
-  );
   console.log('  portal users: ops +251911000001, gov +251911000002');
-  console.log('  bootstrap-demo:', boot);
 
   console.log(
     'Seed complete. Drivers/riders: phone OTP. Ops+Gov portal password: secret123',

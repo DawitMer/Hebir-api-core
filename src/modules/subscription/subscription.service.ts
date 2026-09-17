@@ -47,11 +47,28 @@ export class SubscriptionService {
   ) {}
 
   /**
-   * Paid-plan marketplace gate. Off by default until live collections exist.
-   * Set REQUIRE_DRIVER_SUBSCRIPTION=true to restore the paywall.
+   * Launch grace period. Until the configured date, drivers may work without
+   * a subscription. From that date onward the server enforces the paid plan;
+   * a `false` environment override remains available for emergency rollback.
    */
   isEnforced(): boolean {
-    return this.config.get<string>('REQUIRE_DRIVER_SUBSCRIPTION') === 'true';
+    if (this.config.get<string>('REQUIRE_DRIVER_SUBSCRIPTION') === 'false') {
+      return false;
+    }
+    const configuredStart = this.config.get<string>(
+      'DRIVER_SUBSCRIPTION_ENFORCEMENT_START',
+    );
+    // Launch access remains free through 31 January 2027. The first paid day
+    // is 1 February 2027 UTC, unless operations deliberately sets a later
+    // start date in the deployment environment.
+    const start = new Date(configuredStart ?? '2027-02-01T00:00:00.000Z');
+    if (Number.isNaN(start.getTime())) {
+      this.logger.error(
+        'Invalid DRIVER_SUBSCRIPTION_ENFORCEMENT_START; subscription enforcement remains disabled.',
+      );
+      return false;
+    }
+    return new Date() >= start;
   }
 
   async createChapaCheckout(driverId: string) {

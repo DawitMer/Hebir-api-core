@@ -100,7 +100,7 @@ export class SubscriptionController {
   chapaReturn(@Res() res: Response) {
     res
       .type('text/plain')
-      .send('Payment submitted. Return to the Hebir Driver app.');
+      .send('Payment submitted. Return to the Hebir Taxi Driver app.');
   }
 
   @UseGuards(JwtAuthGuard)

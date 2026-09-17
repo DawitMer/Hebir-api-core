@@ -1,8 +1,16 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { GovAccessLog } from './entities/access-log.entity';
-import { DriverExpense } from './entities/driver-expense.entity';
+import {
+  DriverMonthlyExpenseReport,
+  MonthlyExpenseStatus,
+} from './entities/driver-monthly-expense-report.entity';
 import { Booking, BookingStatus } from '../booking/entities/booking.entity';
 import {
   DriverSubscription,
@@ -22,6 +30,8 @@ import {
   DriverVerification,
   VerificationStatus,
 } from '../kyc/entities/driver-verification.entity';
+import { NotificationsGateway } from '../notifications/notifications.gateway';
+import { PushService } from '../push/push.service';
 
 /** Compliance reports are paged in the portal; this bounds one page. */
 const MAX_REPORT_ROWS = 100;
@@ -33,27 +43,13 @@ function sanitizeSearchTerm(raw: string): string {
   return raw.replace(/[%_\\]/g, '').trim();
 }
 
-const EXPENSE_CATEGORY_LABELS: Record<string, string> = {
-  fuel: 'Fuel',
-  maintenance: 'Maintenance',
-  insurance: 'Insurance',
-  tolls: 'Tolls & Parking',
-  other: 'Other',
-};
-
-function normalizeExpenseCategory(raw: string): string {
-  const key = raw.trim().toLowerCase();
-  if (key === 'tolls & parking') return 'Tolls & Parking';
-  return EXPENSE_CATEGORY_LABELS[key] ?? raw.trim();
-}
-
 @Injectable()
 export class GovService {
   constructor(
     @InjectRepository(GovAccessLog)
     private readonly accessLogs: Repository<GovAccessLog>,
-    @InjectRepository(DriverExpense)
-    private readonly expenses: Repository<DriverExpense>,
+    @InjectRepository(DriverMonthlyExpenseReport)
+    private readonly monthlyReports: Repository<DriverMonthlyExpenseReport>,
     @InjectRepository(Booking) private readonly bookings: Repository<Booking>,
     @InjectRepository(DriverSubscription)
     private readonly subscriptions: Repository<DriverSubscription>,
@@ -68,6 +64,8 @@ export class GovService {
     private readonly fares: Repository<FareRecord>,
     @InjectRepository(DriverVerification)
     private readonly verifications: Repository<DriverVerification>,
+    private readonly notifications: NotificationsGateway,
+    private readonly push: PushService,
   ) {}
 
   async recordAccess(
@@ -199,38 +197,557 @@ export class GovService {
     });
   }
 
-  async listAllExpenses(limit = 300) {
-    const rows = await this.expenses.find({
-      order: { incurredAt: 'DESC' },
-      take: limit,
+  private normalizeReviewStatus(raw: string): MonthlyExpenseStatus {
+    const s = raw.trim().toLowerCase();
+    switch (s) {
+      case 'verified':
+      case 'approved':
+        return MonthlyExpenseStatus.APPROVED;
+      case 'rejected':
+        return MonthlyExpenseStatus.REJECTED;
+      case 'flagged':
+      case 'changes_required':
+        return MonthlyExpenseStatus.CHANGES_REQUIRED;
+      case 'under_review':
+        return MonthlyExpenseStatus.UNDER_REVIEW;
+      case 'draft':
+        return MonthlyExpenseStatus.DRAFT;
+      case 'pending':
+      case 'submitted':
+      default:
+        return MonthlyExpenseStatus.SUBMITTED;
+    }
+  }
+
+  async submitMonthlyExpenseReport(
+    driverId: string,
+    input: {
+      reportingMonth?: string;
+      fuelAmount?: number;
+      maintenanceAmount?: number;
+      insuranceAmount?: number;
+      tollsAmount?: number;
+      otherAmount?: number;
+      totalAmount?: number;
+      notes?: string;
+      isDraft?: boolean;
+      category?: string;
+      amount?: number;
+      description?: string;
+    },
+  ) {
+    const window = await this.getDriverExpenseReportingWindow(driverId);
+    let month = input.reportingMonth?.trim();
+    if (!month && window.months.length) {
+      month = window.months[0];
+    }
+    if (!month || !window.months.includes(month)) {
+      throw new BadRequestException(
+        window.months.length === 0
+          ? 'There are no completed reporting months available yet. Expense reporting opens after your first full calendar month.'
+          : `Expenses may only be reported for completed months from your signup month through ${window.lastEligibleMonth}.`,
+      );
+    }
+
+    let fuel = input.fuelAmount ?? 0;
+    let maint = input.maintenanceAmount ?? 0;
+    let insur = input.insuranceAmount ?? 0;
+    let tolls = input.tollsAmount ?? 0;
+    let other = input.otherAmount ?? 0;
+
+    // Handle legacy single-expense payload if provided
+    if (input.category && input.amount) {
+      const cat = input.category.toLowerCase();
+      if (cat.includes('fuel')) fuel += input.amount;
+      else if (cat.includes('maint')) maint += input.amount;
+      else if (cat.includes('insur')) insur += input.amount;
+      else if (cat.includes('toll') || cat.includes('park'))
+        tolls += input.amount;
+      else other += input.amount;
+    }
+
+    let total = fuel + maint + insur + tolls + other;
+    if (total === 0 && input.totalAmount && input.totalAmount > 0) {
+      total = input.totalAmount;
+      other = input.totalAmount;
+    }
+
+    const notes = input.notes?.trim() || input.description?.trim() || null;
+    const isDraft = Boolean(input.isDraft);
+
+    // Check for existing report for this driver and month to prevent duplicates
+    const existing = await this.monthlyReports.findOne({
+      where: { driverId, reportingMonth: month },
     });
-    const driverIds = [...new Set(rows.map((r) => r.driverId))];
-    const owners =
-      driverIds.length === 0
-        ? []
-        : await this.users.find({
-            where: { id: In(driverIds) },
-            select: { id: true, tin: true, fullName: true },
+
+    if (existing) {
+      if (
+        existing.status === MonthlyExpenseStatus.DRAFT ||
+        existing.status === MonthlyExpenseStatus.CHANGES_REQUIRED
+      ) {
+        existing.fuelAmount = fuel.toFixed(2);
+        existing.maintenanceAmount = maint.toFixed(2);
+        existing.insuranceAmount = insur.toFixed(2);
+        existing.tollsAmount = tolls.toFixed(2);
+        existing.otherAmount = other.toFixed(2);
+        existing.totalAmount = total.toFixed(2);
+        existing.notes = notes;
+        existing.status = isDraft
+          ? MonthlyExpenseStatus.DRAFT
+          : MonthlyExpenseStatus.SUBMITTED;
+        existing.submittedAt = isDraft ? existing.submittedAt : new Date();
+        return this.monthlyReports.save(existing);
+      }
+
+      if (
+        existing.status === MonthlyExpenseStatus.SUBMITTED ||
+        existing.status === MonthlyExpenseStatus.UNDER_REVIEW
+      ) {
+        throw new ConflictException(
+          `A monthly expense report for ${month} has already been submitted and is currently ${existing.status === MonthlyExpenseStatus.UNDER_REVIEW ? 'under review' : 'pending review'}.`,
+        );
+      }
+
+      if (existing.status === MonthlyExpenseStatus.APPROVED) {
+        throw new ConflictException(
+          `A monthly expense report for ${month} has already been approved.`,
+        );
+      }
+
+      if (existing.status === MonthlyExpenseStatus.REJECTED) {
+        throw new ConflictException(
+          `The expense report for ${month} was rejected. Please contact an officer or support to request changes.`,
+        );
+      }
+    }
+
+    const report = this.monthlyReports.create({
+      driverId,
+      reportingMonth: month,
+      status: isDraft
+        ? MonthlyExpenseStatus.DRAFT
+        : MonthlyExpenseStatus.SUBMITTED,
+      fuelAmount: fuel.toFixed(2),
+      maintenanceAmount: maint.toFixed(2),
+      insuranceAmount: insur.toFixed(2),
+      tollsAmount: tolls.toFixed(2),
+      otherAmount: other.toFixed(2),
+      totalAmount: total.toFixed(2),
+      notes,
+      submittedAt: isDraft ? null : new Date(),
+    });
+
+    return this.monthlyReports.save(report);
+  }
+
+  async updateMonthlyExpenseReport(
+    driverId: string,
+    reportId: string,
+    input: {
+      fuelAmount?: number;
+      maintenanceAmount?: number;
+      insuranceAmount?: number;
+      tollsAmount?: number;
+      otherAmount?: number;
+      totalAmount?: number;
+      notes?: string;
+      submit?: boolean;
+    },
+  ) {
+    const report = await this.monthlyReports.findOne({
+      where: { id: reportId, driverId },
+    });
+    if (!report) {
+      throw new NotFoundException('Monthly expense report not found');
+    }
+
+    if (report.status === MonthlyExpenseStatus.APPROVED) {
+      throw new BadRequestException(
+        'Cannot modify an approved expense report.',
+      );
+    }
+    if (
+      report.status === MonthlyExpenseStatus.SUBMITTED ||
+      report.status === MonthlyExpenseStatus.UNDER_REVIEW
+    ) {
+      throw new BadRequestException(
+        'This report is currently under review. Editing is permitted when in draft or when changes are requested.',
+      );
+    }
+
+    if (input.fuelAmount !== undefined)
+      report.fuelAmount = input.fuelAmount.toFixed(2);
+    if (input.maintenanceAmount !== undefined)
+      report.maintenanceAmount = input.maintenanceAmount.toFixed(2);
+    if (input.insuranceAmount !== undefined)
+      report.insuranceAmount = input.insuranceAmount.toFixed(2);
+    if (input.tollsAmount !== undefined)
+      report.tollsAmount = input.tollsAmount.toFixed(2);
+    if (input.otherAmount !== undefined)
+      report.otherAmount = input.otherAmount.toFixed(2);
+
+    const fuel = Number(report.fuelAmount) || 0;
+    const maint = Number(report.maintenanceAmount) || 0;
+    const insur = Number(report.insuranceAmount) || 0;
+    const tolls = Number(report.tollsAmount) || 0;
+    const other = Number(report.otherAmount) || 0;
+
+    report.totalAmount = (fuel + maint + insur + tolls + other).toFixed(2);
+    if (input.notes !== undefined) report.notes = input.notes.trim() || null;
+
+    if (input.submit) {
+      report.status = MonthlyExpenseStatus.SUBMITTED;
+      report.submittedAt = new Date();
+    }
+
+    return this.monthlyReports.save(report);
+  }
+
+  async listDriverMonthlyReports(driverId: string) {
+    const window = await this.getDriverExpenseReportingWindow(driverId);
+    if (window.months.length === 0) return [];
+    const rows = await this.monthlyReports
+      .createQueryBuilder('report')
+      .where('report."driverId" = :driverId', { driverId })
+      .andWhere('report."reportingMonth" >= :firstEligibleMonth', {
+        firstEligibleMonth: window.firstEligibleMonth,
+      })
+      .andWhere('report."reportingMonth" <= :lastEligibleMonth', {
+        lastEligibleMonth: window.lastEligibleMonth,
+      })
+      .orderBy('report."reportingMonth"', 'DESC')
+      .addOrderBy('report."createdAt"', 'DESC')
+      .take(MAX_REPORT_ROWS)
+      .getMany();
+    return rows.map((r) => ({
+      ...r,
+      fiscalMonth: r.reportingMonth,
+      amount: Number(r.totalAmount),
+      category: 'Monthly Summary',
+      description: r.notes || `Expense report for ${r.reportingMonth}`,
+      incurredAt: r.submittedAt || r.createdAt,
+      reviewStatus: r.status,
+    }));
+  }
+
+  /**
+   * A driver may report only full, completed calendar months, beginning with
+   * the calendar month in which their account was created.  The server owns
+   * this rule so the mobile app and portals cannot expose invented, future,
+   * or pre-signup periods.
+   */
+  async getDriverExpenseReportingWindow(driverId: string) {
+    const driver = await this.users.findOne({
+      where: { id: driverId },
+      select: { id: true, createdAt: true },
+    });
+    if (!driver) throw new NotFoundException('Driver not found');
+
+    const signupMonth = `${driver.createdAt.getUTCFullYear()}-${String(
+      driver.createdAt.getUTCMonth() + 1,
+    ).padStart(2, '0')}`;
+    const now = new Date();
+    const lastCompleted = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0),
+    );
+    const lastEligibleMonth = `${lastCompleted.getUTCFullYear()}-${String(
+      lastCompleted.getUTCMonth() + 1,
+    ).padStart(2, '0')}`;
+    const months: string[] = [];
+    if (signupMonth <= lastEligibleMonth) {
+      for (
+        let cursor = new Date(
+          Date.UTC(
+            driver.createdAt.getUTCFullYear(),
+            driver.createdAt.getUTCMonth(),
+            1,
+          ),
+        );
+        cursor <= lastCompleted;
+        cursor = new Date(
+          Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1),
+        )
+      ) {
+        months.push(
+          `${cursor.getUTCFullYear()}-${String(cursor.getUTCMonth() + 1).padStart(2, '0')}`,
+        );
+      }
+    }
+
+    return {
+      firstEligibleMonth: months[0] ?? null,
+      lastEligibleMonth: months[months.length - 1] ?? null,
+      months: months.reverse(),
+    };
+  }
+
+  async getDriverMonthlyReport(driverId: string, reportId: string) {
+    const report = await this.monthlyReports.findOne({
+      where: { id: reportId, driverId },
+    });
+    if (!report) {
+      throw new NotFoundException('Expense report not found');
+    }
+    return {
+      ...report,
+      fiscalMonth: report.reportingMonth,
+      amount: Number(report.totalAmount),
+      category: 'Monthly Summary',
+      description:
+        report.notes || `Expense report for ${report.reportingMonth}`,
+      incurredAt: report.submittedAt || report.createdAt,
+      reviewStatus: report.status,
+    };
+  }
+
+  async getMonthlyReportById(reportId: string) {
+    const report = await this.monthlyReports.findOne({
+      where: { id: reportId },
+      relations: { driver: true, reviewer: true },
+    });
+    if (!report) {
+      throw new NotFoundException('Expense report not found');
+    }
+    return {
+      ...report,
+      driverName: report.driver?.fullName || report.driver?.phoneNumber || null,
+      driverTin: report.driver?.tin || null,
+      driverPhone: report.driver?.phoneNumber || null,
+      reviewerName: report.reviewer?.fullName || null,
+      fiscalMonth: report.reportingMonth,
+      amount: Number(report.totalAmount),
+      category: 'Monthly Summary',
+      description:
+        report.notes || `Expense report for ${report.reportingMonth}`,
+      incurredAt: report.submittedAt || report.createdAt,
+      reviewStatus: report.status,
+    };
+  }
+
+  async listAllExpenses(options?: {
+    status?: string;
+    month?: string;
+    search?: string;
+    limit?: number;
+  }) {
+    const now = new Date();
+    const currentMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+    const limit = options?.limit ?? 300;
+    const isFilterNotSubmitted = options?.status === 'not_submitted';
+
+    const qb = this.monthlyReports
+      .createQueryBuilder('r')
+      .leftJoinAndSelect('r.driver', 'driver')
+      .leftJoinAndSelect('r.reviewer', 'reviewer')
+      .where('r.reportingMonth <= :currentMonth', { currentMonth })
+      .orderBy('r.reportingMonth', 'DESC')
+      .addOrderBy('r.updatedAt', 'DESC')
+      .take(limit);
+
+    if (options?.status && options.status !== 'all' && !isFilterNotSubmitted) {
+      const mapped = this.normalizeReviewStatus(options.status);
+      qb.andWhere('r.status = :status', { status: mapped });
+    }
+    if (options?.month) {
+      qb.andWhere('r.reportingMonth = :month', { month: options.month });
+    }
+    if (options?.search) {
+      const s = sanitizeSearchTerm(options.search);
+      if (s) {
+        qb.andWhere(
+          '(driver.fullName ILIKE :s OR driver.tin ILIKE :s OR driver.phoneNumber ILIKE :s)',
+          { s: `%${s}%` },
+        );
+      }
+    }
+
+    const rows = isFilterNotSubmitted ? [] : await qb.getMany();
+    const mappedRows = rows.map((r) => ({
+      id: r.id,
+      driverId: r.driverId,
+      driverTin: r.driver?.tin ?? null,
+      driverName: r.driver?.fullName ?? r.driver?.phoneNumber ?? null,
+      driverPhone: r.driver?.phoneNumber ?? null,
+      reportingMonth: r.reportingMonth,
+      fiscalMonth: r.reportingMonth,
+      status: r.status,
+      fuelAmount: Number(r.fuelAmount),
+      maintenanceAmount: Number(r.maintenanceAmount),
+      insuranceAmount: Number(r.insuranceAmount),
+      tollsAmount: Number(r.tollsAmount),
+      otherAmount: Number(r.otherAmount),
+      totalAmount: Number(r.totalAmount),
+      amount: Number(r.totalAmount),
+      category: 'Monthly Summary',
+      description: r.notes || `Monthly summary for ${r.reportingMonth}`,
+      notes: r.notes,
+      reviewerId: r.reviewerId,
+      reviewerName: r.reviewer?.fullName ?? null,
+      reviewerNotes: r.reviewerNotes,
+      reviewedAt: r.reviewedAt,
+      submittedAt: r.submittedAt,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      incurredAt: r.submittedAt || r.createdAt,
+      reviewStatus: r.status,
+    }));
+
+    // If viewing unsubmitted or all, detect active drivers who have not submitted for target month
+    if (
+      isFilterNotSubmitted ||
+      (options?.month && (!options?.status || options.status === 'all'))
+    ) {
+      const targetMonth = options?.month ?? currentMonth;
+      if (targetMonth <= currentMonth) {
+        const submittedDriverIds = new Set(
+          (
+            await this.monthlyReports.find({
+              where: { reportingMonth: targetMonth },
+            })
+          ).map((r) => r.driverId),
+        );
+
+        const driversQb = this.users
+          .createQueryBuilder('u')
+          .where(':role = ANY(u.roles)', { role: UserRole.DRIVER });
+
+        if (options?.search) {
+          const s = sanitizeSearchTerm(options.search);
+          if (s) {
+            driversQb.andWhere(
+              '(u.fullName ILIKE :s OR u.tin ILIKE :s OR u.phoneNumber ILIKE :s)',
+              { s: `%${s}%` },
+            );
+          }
+        }
+
+        const allDrivers = await driversQb.getMany();
+        const unsubmittedDrivers = allDrivers.filter(
+          (d) => !submittedDriverIds.has(d.id),
+        );
+
+        const unsubmittedRows = unsubmittedDrivers.map((d) => ({
+          id: `unsubmitted-${d.id}-${targetMonth}`,
+          driverId: d.id,
+          driverTin: d.tin ?? null,
+          driverName: d.fullName ?? d.phoneNumber ?? null,
+          driverPhone: d.phoneNumber ?? null,
+          reportingMonth: targetMonth,
+          fiscalMonth: targetMonth,
+          status: 'not_submitted',
+          fuelAmount: 0,
+          maintenanceAmount: 0,
+          insuranceAmount: 0,
+          tollsAmount: 0,
+          otherAmount: 0,
+          totalAmount: 0,
+          amount: 0,
+          category: 'Monthly Summary',
+          description: `Report not yet submitted for ${targetMonth}`,
+          notes: null,
+          reviewerId: null,
+          reviewerName: null,
+          reviewerNotes: null,
+          reviewedAt: null,
+          submittedAt: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          incurredAt: null,
+          reviewStatus: 'not_submitted',
+        }));
+
+        return isFilterNotSubmitted
+          ? unsubmittedRows
+          : [...mappedRows, ...unsubmittedRows];
+      }
+    }
+
+    return mappedRows;
+  }
+
+  async setExpenseReviewStatus(
+    expenseId: string,
+    rawStatus: string,
+    reviewerId?: string,
+    reviewerNotes?: string,
+  ) {
+    const status = this.normalizeReviewStatus(rawStatus);
+
+    const report = await this.monthlyReports.findOne({
+      where: { id: expenseId },
+    });
+
+    if (report) {
+      report.status = status;
+      if (reviewerId) report.reviewerId = reviewerId;
+      if (reviewerNotes !== undefined) report.reviewerNotes = reviewerNotes;
+      report.reviewedAt = new Date();
+      const saved = await this.monthlyReports.save(report);
+
+      try {
+        if (status === MonthlyExpenseStatus.APPROVED) {
+          await this.notifications.notify(report.driverId, 'expense.approved', {
+            reportId: report.id,
+            month: report.reportingMonth,
+            totalAmount: report.totalAmount,
           });
-    const byId = new Map(owners.map((u) => [u.id, u]));
-    return rows.map((e) => {
-      const owner = byId.get(e.driverId);
-      return {
-        ...e,
-        tin: owner?.tin ?? null,
-        driverName: owner?.fullName ?? null,
-      };
-    });
+          await this.push.send(
+            report.driverId,
+            'expense.approved',
+            'Monthly Expense Approved',
+            `Your expense report for ${report.reportingMonth} has been approved.`,
+            { reportId: report.id, month: report.reportingMonth },
+          );
+        } else if (status === MonthlyExpenseStatus.REJECTED) {
+          await this.notifications.notify(report.driverId, 'expense.rejected', {
+            reportId: report.id,
+            month: report.reportingMonth,
+            reason: reviewerNotes,
+          });
+          await this.push.send(
+            report.driverId,
+            'expense.rejected',
+            'Monthly Expense Rejected',
+            `Your expense report for ${report.reportingMonth} was rejected${reviewerNotes ? ': ' + reviewerNotes : '.'}`,
+            {
+              reportId: report.id,
+              month: report.reportingMonth,
+              reason: reviewerNotes,
+            },
+          );
+        } else if (status === MonthlyExpenseStatus.CHANGES_REQUIRED) {
+          await this.notifications.notify(
+            report.driverId,
+            'expense.changes_requested',
+            {
+              reportId: report.id,
+              month: report.reportingMonth,
+              reason: reviewerNotes,
+            },
+          );
+          await this.push.send(
+            report.driverId,
+            'expense.changes_requested',
+            'Action Required: Expense Changes Requested',
+            `Please update your ${report.reportingMonth} expense report${reviewerNotes ? ': ' + reviewerNotes : '.'}`,
+            {
+              reportId: report.id,
+              month: report.reportingMonth,
+              reason: reviewerNotes,
+            },
+          );
+        }
+      } catch {
+        // Notification delivery is best effort
+      }
+
+      return saved;
+    }
+
+    throw new NotFoundException('Expense report not found');
   }
 
-  async setExpenseReviewStatus(expenseId: string, status: string) {
-    const expense = await this.expenses.findOne({ where: { id: expenseId } });
-    if (!expense) throw new NotFoundException('Expense not found');
-    expense.reviewStatus = status;
-    return this.expenses.save(expense);
-  }
-
-  /** Driver self-service: declare a business expense for tax compliance. */
+  /** Legacy driver self-service adapter. */
   async createDriverExpense(input: {
     driverId: string;
     category: string;
@@ -238,16 +755,11 @@ export class GovService {
     description: string | null;
     incurredAt?: Date;
   }) {
-    const category = normalizeExpenseCategory(input.category);
-    const row = this.expenses.create({
-      driverId: input.driverId,
-      category,
-      amount: input.amount.toFixed(2),
-      description: input.description,
-      incurredAt: input.incurredAt ?? new Date(),
-      reviewStatus: 'pending',
+    return this.submitMonthlyExpenseReport(input.driverId, {
+      category: input.category,
+      amount: input.amount,
+      description: input.description ?? undefined,
     });
-    return this.expenses.save(row);
   }
 
   async getDriverTrips(driverId: string) {
@@ -303,10 +815,15 @@ export class GovService {
     const driver = await this.users.findOne({ where: { id: driverId } });
     if (!driver) throw new NotFoundException('Driver not found');
 
-    const year = new Date().getUTCFullYear();
+    const now = new Date();
+    const year = now.getUTCFullYear();
+    const currentMonthIdx = now.getUTCMonth();
+    const currentMonthStr = `${year}-${String(currentMonthIdx + 1).padStart(2, '0')}`;
     const start = new Date(Date.UTC(year, 0, 1));
-    const end = new Date(Date.UTC(year + 1, 0, 1));
-    // Aggregate in SQL, never sum a paged UI sample. Reporting period is explicit.
+    const currentMonthStart = new Date(Date.UTC(year, currentMonthIdx, 1));
+    const nextMonthStart = new Date(Date.UTC(year, currentMonthIdx + 1, 1));
+
+    // Aggregate in SQL strictly up to current month (ended months + current unsubmitted month)
     const rows = (await this.rides.manager.query(
       `
       WITH revenue AS (
@@ -322,33 +839,57 @@ export class GovService {
         SELECT t."createdAt", t.amount::numeric, 0, 0 FROM tips t
         WHERE t."driverId" = $1 AND t.status = 'succeeded'
       ), months AS (
-        SELECT generate_series($2::timestamptz, $3::timestamptz - interval '1 month', interval '1 month') AS month
+        SELECT generate_series($2::timestamptz, $3::timestamptz, interval '1 month') AS month
       )
       SELECT to_char(m.month AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
         COALESCE((SELECT SUM(gross) FROM revenue WHERE at >= m.month AND at < m.month + interval '1 month'), 0) AS gross,
         COALESCE((SELECT SUM(fee) FROM revenue WHERE at >= m.month AND at < m.month + interval '1 month'), 0) AS fee,
         COALESCE((SELECT SUM(trips) FROM revenue WHERE at >= m.month AND at < m.month + interval '1 month'), 0) AS trips,
-        COALESCE((SELECT SUM(e.amount::numeric) FROM driver_expenses e WHERE e."driverId" = $1
-          AND e."incurredAt" >= m.month AND e."incurredAt" < m.month + interval '1 month'), 0) AS expenses
+        COALESCE((
+          SELECT SUM(r."totalAmount"::numeric)
+          FROM driver_monthly_expense_reports r
+          WHERE r."driverId" = $1
+            AND r."reportingMonth" = to_char(m.month AT TIME ZONE 'UTC', 'YYYY-MM')
+            AND r.status IN ('approved', 'submitted', 'under_review')
+        ), 0) AS expenses,
+        (
+          SELECT r.status
+          FROM driver_monthly_expense_reports r
+          WHERE r."driverId" = $1
+            AND r."reportingMonth" = to_char(m.month AT TIME ZONE 'UTC', 'YYYY-MM')
+          LIMIT 1
+        ) AS report_status
       FROM months m ORDER BY m.month
     `,
-      [driverId, start, end],
+      [driverId, start, currentMonthStart],
     )) as Array<{
       month: string;
       gross: string;
       fee: string;
       trips: string;
       expenses: string;
+      report_status: string | null;
     }>;
-    const monthlyBreakdown = rows.map((row) => ({
-      month: row.month,
-      gross: Number(row.gross),
-      serviceFee: Number(row.fee),
-      trips: Number(row.trips),
-      expenses: Number(row.expenses),
-      netTaxable: Number(row.gross) - Number(row.expenses),
-      status: 'reported',
-    }));
+    const monthlyBreakdown = rows.map((row) => {
+      const isCurrent = row.month === currentMonthStr;
+      let status = 'not_submitted';
+      if (row.report_status) {
+        status = row.report_status;
+      } else if (!isCurrent) {
+        status = 'not_submitted';
+      }
+
+      return {
+        month: row.month,
+        gross: Number(row.gross),
+        serviceFee: Number(row.fee),
+        trips: Number(row.trips),
+        expenses: Number(row.expenses),
+        netTaxable: Number(row.gross) - Number(row.expenses),
+        status,
+        periodType: isCurrent ? 'current_unsubmitted' : 'ended',
+      };
+    });
     const grossEarnings = monthlyBreakdown.reduce(
       (sum, row) => sum + row.gross,
       0,
@@ -360,7 +901,11 @@ export class GovService {
     return {
       driverId,
       fiscalYear: year,
-      reportPeriod: { start, end, basis: 'UTC calendar year' },
+      reportPeriod: {
+        start,
+        end: nextMonthStart,
+        basis: 'UTC calendar year to date',
+      },
       totalTrips: monthlyBreakdown.reduce((sum, row) => sum + row.trips, 0),
       grossEarnings,
       reportedExpenses,
@@ -374,15 +919,12 @@ export class GovService {
   }
 
   getDriverExpenses(driverId: string) {
-    return this.expenses.find({
-      where: { driverId },
-      order: { incurredAt: 'DESC' },
-      take: MAX_REPORT_ROWS,
-    });
+    return this.listDriverMonthlyReports(driverId);
   }
 
   async getDashboardStats() {
     const yearStart = new Date(Date.UTC(new Date().getUTCFullYear(), 0, 1));
+    const startMonth = `${yearStart.getUTCFullYear()}-01`;
     const [
       totalDrivers,
       activeSubscriptions,
@@ -424,14 +966,16 @@ export class GovService {
           { good: AccountStanding.GOOD, approved: VerificationStatus.APPROVED },
         )
         .getCount(),
-      this.expenses
+      this.monthlyReports
         .createQueryBuilder('e')
-        .select('COUNT(DISTINCT e.driverId)', 'count')
+        .select('COUNT(DISTINCT e."driverId")', 'count')
+        .where("e.status IN ('submitted', 'under_review', 'approved')")
         .getRawOne<{ count: string }>(),
-      this.expenses
+      this.monthlyReports
         .createQueryBuilder('e')
-        .select('COALESCE(SUM(e.amount::numeric), 0)', 'total')
-        .where('e.incurredAt >= :yearStart', { yearStart })
+        .select('COALESCE(SUM(e."totalAmount"::numeric), 0)', 'total')
+        .where('e."reportingMonth" >= :startMonth', { startMonth })
+        .andWhere("e.status IN ('submitted', 'under_review', 'approved')")
         .getRawOne<{ total: string }>(),
     ]);
 

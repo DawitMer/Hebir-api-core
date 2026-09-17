@@ -1,5 +1,4 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ILike, In, Repository } from 'typeorm';
 import {
@@ -19,7 +18,6 @@ import {
 } from '../kyc/entities/driver-verification.entity';
 import { AuditTrail } from '../kyc/entities/audit-trail.entity';
 import { FareRecord } from '../rides/entities/fare-record.entity';
-import { DriverExpense } from '../gov/entities/driver-expense.entity';
 import { DriverLocationHistory } from '../location/entities/driver-location-history.entity';
 import { IncidentsService } from '../incidents/incidents.service';
 import { LocationSvcClient } from '../../common/location-svc/location-svc.client';
@@ -37,7 +35,6 @@ export class AdminService {
   private readonly logger = new Logger(AdminService.name);
 
   constructor(
-    private readonly config: ConfigService,
     private readonly locationSvc: LocationSvcClient,
     @InjectRepository(UserAccount)
     private readonly users: Repository<UserAccount>,
@@ -51,8 +48,6 @@ export class AdminService {
     private readonly audit: Repository<AuditTrail>,
     @InjectRepository(FareRecord)
     private readonly fares: Repository<FareRecord>,
-    @InjectRepository(DriverExpense)
-    private readonly expenses: Repository<DriverExpense>,
     @InjectRepository(DriverLocationHistory)
     private readonly locationHistory: Repository<DriverLocationHistory>,
     private readonly incidents: IncidentsService,
@@ -440,68 +435,6 @@ export class AdminService {
       this.logger.warn(`Demand grid unavailable: ${(error as Error).message}`);
       return [];
     }
-  }
-
-  async bootstrapDemo() {
-    const drivers = await this.users
-      .createQueryBuilder('u')
-      .where(':role = ANY(u.roles)', { role: UserRole.DRIVER })
-      .take(MAX_LIST_ROWS)
-      .getMany();
-
-    let kycCreated = 0;
-    let expensesCreated = 0;
-
-    for (const driver of drivers.slice(0, 6)) {
-      const existing = await this.verifications.findOne({
-        where: { driverId: driver.id },
-      });
-      if (!existing) {
-        const vehicle = await this.vehicles.findOne({
-          where: { driverId: driver.id },
-        });
-        await this.verifications.save(
-          this.verifications.create({
-            driverId: driver.id,
-            licenseNumber: `ET-${driver.phoneNumber.replace(/\D/g, '').slice(-6)}`,
-            region: 'Addis Ababa',
-            vehicleType: vehicle?.make ?? 'Sedan',
-            vehicleYear: 2019,
-            status: VerificationStatus.PENDING,
-          }),
-        );
-        kycCreated += 1;
-      }
-
-      const expenseCount = await this.expenses.count({
-        where: { driverId: driver.id },
-      });
-      if (expenseCount === 0) {
-        await this.expenses.save([
-          this.expenses.create({
-            driverId: driver.id,
-            category: 'Fuel',
-            amount: '850.00',
-            description: 'Weekly fuel',
-            incurredAt: new Date(Date.now() - 3 * 86400000),
-          }),
-          this.expenses.create({
-            driverId: driver.id,
-            category: 'Maintenance',
-            amount: '1200.00',
-            description: 'Oil change',
-            incurredAt: new Date(Date.now() - 10 * 86400000),
-          }),
-        ]);
-        expensesCreated += 2;
-      }
-    }
-
-    return {
-      drivers: drivers.length,
-      kycCreated,
-      expensesCreated,
-    };
   }
 
   private async enrichDriversBatch(users: UserAccount[]) {

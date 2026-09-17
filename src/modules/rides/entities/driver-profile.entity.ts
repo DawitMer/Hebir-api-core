@@ -45,6 +45,14 @@ export class DriverProfile {
   @Column({ type: 'timestamptz', nullable: true })
   idleSince: Date | null;
 
+  /**
+   * Ride categories this driver has opted into. A null value keeps the
+   * historical behaviour (all categories their approved vehicle can serve).
+   * Values are normalized dispatch bands: moto, sedan, and suv.
+   */
+  @Column({ type: 'text', array: true, nullable: true })
+  acceptedVehicleTypes: string[] | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

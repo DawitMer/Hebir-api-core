@@ -52,10 +52,9 @@ async function bootstrap() {
       crossOriginResourcePolicy: { policy: 'cross-origin' },
       crossOriginEmbedderPolicy: false,
       referrerPolicy: { policy: 'no-referrer' },
-      hsts:
-        config.get<string>('NODE_ENV') === 'production'
-          ? { maxAge: 15552000, includeSubDomains: true, preload: false }
-          : false,
+      // Browsers honor HSTS only over HTTPS. Keep it present behind the TLS
+      // proxy even if the host has omitted NODE_ENV; do not cover sibling hosts.
+      hsts: { maxAge: 31536000, includeSubDomains: false, preload: false },
     }),
   );
 

@@ -37,9 +37,10 @@ async function main() {
     .post(`${API}/subscription/dev-activate`, {}, auth(driver.token))
     .catch(() => undefined);
 
-  const locHeaders = process.env.LOCATION_SVC_TOKEN
-    ? { headers: { 'X-Internal-Token': process.env.LOCATION_SVC_TOKEN } }
-    : {};
+  const locToken =
+    process.env.LOCATION_SVC_TOKEN ??
+    '192e7dd4f8dcc2c2f53dff7d3447b2f3df473889f608a96bad90908325cf9594';
+  const locHeaders = { headers: { Authorization: `Bearer ${locToken}` } };
 
   await axios.post(
     `${API}/drivers/location`,

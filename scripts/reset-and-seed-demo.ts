@@ -361,13 +361,21 @@ async function main() {
   }
 
   console.log('==> Push live GPS to location-svc');
+  const locToken =
+    process.env.LOCATION_SVC_TOKEN ??
+    '192e7dd4f8dcc2c2f53dff7d3447b2f3df473889f608a96bad90908325cf9594';
+  const locHeaders = { headers: { Authorization: `Bearer ${locToken}` } };
   let locOk = 0;
   for (const d of drivers) {
     try {
-      await axios.post(`${LOC}/drivers/location`, {
-        driverId: d.id,
-        location: d.loc,
-      });
+      await axios.post(
+        `${LOC}/drivers/location`,
+        {
+          driverId: d.id,
+          location: d.loc,
+        },
+        locHeaders,
+      );
       locOk += 1;
     } catch (err: any) {
       console.warn(`  loc skip ${d.phone}:`, err?.message ?? err);
@@ -376,13 +384,18 @@ async function main() {
   console.log(`  location-svc ok: ${locOk}/${drivers.length}`);
 
   try {
-    const nearby = await axios.post(`${LOC}/drivers/nearby`, {
-      pickup: ADDIS,
-      radiusKm: 12,
-    });
+    const nearby = await axios.post(
+      `${LOC}/drivers/nearby`,
+      {
+        pickup: ADDIS,
+        radiusKm: 12,
+      },
+      locHeaders,
+    );
     console.log('  redis nearby drivers:', nearby.data?.driverIds?.length ?? nearby.data);
     const listed = await axios.get(`${LOC}/drivers/locations`, {
       params: { lat: ADDIS.lat, lng: ADDIS.lng, radiusKm: 12 },
+      ...locHeaders,
     });
     console.log('  redis map pins:', listed.data?.drivers?.length ?? listed.data);
   } catch (err: any) {

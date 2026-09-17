@@ -21,6 +21,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { KycModule } from '../kyc/kyc.module';
 import { DispatchQueueService } from './dispatch/dispatch.queue.service';
 import { PaymentsModule } from '../payments/payments.module';
+import { AdsModule } from '../ads/ads.module';
 
 import { TripRouteRecorderService } from './trip-route-recorder.service';
 
@@ -45,6 +46,7 @@ import { TripRouteRecorderService } from './trip-route-recorder.service';
     NotificationsModule,
     KycModule,
     PaymentsModule,
+    AdsModule,
   ],
   controllers: [RidesController, DriverPresenceController],
   providers: [RidesService, DispatchQueueService, TripRouteRecorderService],

@@ -103,7 +103,7 @@ export class ChapaClient {
     ).replace(/\/$/, '');
     const phone = toEthiopiaNational10(driver.phoneNumber) ?? undefined;
     const amount = String(input.amountEtb);
-    const names = (driver.fullName ?? 'Hebir Driver').trim().split(/\s+/);
+    const names = (driver.fullName ?? 'Hebir Taxi Driver').trim().split(/\s+/);
     const firstName = names[0] || 'Driver';
     const lastName = names.slice(1).join(' ') || 'Hebir';
 
@@ -124,7 +124,7 @@ export class ChapaClient {
         callback_url: `${publicBase}/subscription/chapa/callback`,
         return_url: `${publicBase}/subscription/chapa/return`,
         customization: {
-          title: 'Hebir Driver',
+          title: 'Hebir Taxi Driver',
           description: 'Monthly driver access',
         },
         meta: { driverId: driver.id, kind: 'subscription' },

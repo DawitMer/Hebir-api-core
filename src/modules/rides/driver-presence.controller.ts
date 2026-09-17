@@ -1,5 +1,5 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
-import { IsBoolean, IsOptional, IsString } from 'class-validator';
+import { Body, Controller, Get, Patch, Post, UseGuards } from '@nestjs/common';
+import { ArrayNotEmpty, IsArray, IsBoolean, IsIn, IsOptional, IsString } from 'class-validator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -14,6 +14,13 @@ class SetPresenceDto {
   @IsOptional()
   @IsString()
   connectedAccountId?: string;
+}
+
+class DriverServicePreferencesDto {
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsIn(['moto', 'sedan', 'suv'], { each: true })
+  acceptedVehicleTypes: string[];
 }
 
 /**
@@ -43,5 +50,27 @@ export class DriverPresenceController {
   @Get('presence')
   getPresence(@CurrentUser() user: { userId: string }) {
     return this.ridesService.getDriverPresence(user.userId);
+  }
+
+  /** Categories the driver's verified vehicle can serve, plus their choices. */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.DRIVER, UserRole.ADMIN)
+  @Get('service-preferences')
+  getServicePreferences(@CurrentUser() user: { userId: string }) {
+    return this.ridesService.getDriverServicePreferences(user.userId);
+  }
+
+  /** Drivers may opt out of eligible categories; they cannot opt into more. */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.DRIVER, UserRole.ADMIN)
+  @Patch('service-preferences')
+  setServicePreferences(
+    @CurrentUser() user: { userId: string },
+    @Body() body: DriverServicePreferencesDto,
+  ) {
+    return this.ridesService.setDriverServicePreferences(
+      user.userId,
+      body.acceptedVehicleTypes,
+    );
   }
 }

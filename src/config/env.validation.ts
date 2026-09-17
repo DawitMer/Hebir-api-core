@@ -126,6 +126,9 @@ class EnvironmentVariables {
   @IsIn(['true', 'false'])
   REQUIRE_DRIVER_SUBSCRIPTION?: string;
 
+  /** ISO date when the post-launch subscription requirement begins. */
+  DRIVER_SUBSCRIPTION_ENFORCEMENT_START?: string;
+
   /**
    * When `true`, drivers without APPROVED KYC cannot go online.
    * Default off for local demos; enable in production.

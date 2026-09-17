@@ -42,7 +42,7 @@ import { UserAccount, UserRole } from '../auth/entities/user-account.entity';
 import { RequestRideDto } from './dto/request-ride.dto';
 import { ListRideMessagesDto } from './dto/list-ride-messages.dto';
 import { DriverInitiatedRideDto } from './dto/driver-initiated-ride.dto';
-import { FareService } from '../fare/fare.service';
+import { FareBreakdown, FareService } from '../fare/fare.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { KycService } from '../kyc/kyc.service';
 import { VerificationStatus } from '../kyc/entities/driver-verification.entity';
@@ -103,6 +103,21 @@ export type EnrichedRide = Omit<Ride, 'fare'> & {
   startCode?: string | null;
   requiresStartCode?: boolean;
 };
+
+/** The exact server-calculated quote shown to both rider and driver. */
+type FareQuotePayload = Pick<
+  FareBreakdown,
+  | 'total'
+  | 'initialFee'
+  | 'distanceCharge'
+  | 'timeCharge'
+  | 'waitCharge'
+  | 'vehicleMultiplier'
+  | 'surgeMultiplier'
+  | 'platformFee'
+>;
+
+export type RequestedRide = Ride & { estimatedFare: FareQuotePayload };
 
 type OfferOutcome = 'accepted' | 'declined' | 'timeout' | 'stale';
 
@@ -174,6 +189,7 @@ type StartCodeRecord = {
 };
 
 import { TripRouteRecorderService } from './trip-route-recorder.service';
+import { AdRewardsService } from '../ads/ads.service';
 
 @Injectable()
 export class RidesService {
@@ -210,6 +226,7 @@ export class RidesService {
     @Inject(FARE_PAYMENT_PROVIDER)
     private readonly farePayments: PaymentProvider,
     private readonly routeRecorder: TripRouteRecorderService,
+    private readonly adRewards?: AdRewardsService,
   ) {}
 
   /**
@@ -217,7 +234,10 @@ export class RidesService {
    * persisted as `searching` immediately, then dispatch is enqueued on the
    * Redis worker queue (resumable; no in-process while loop).
    */
-  async requestRide(riderId: string, dto: RequestRideDto): Promise<Ride> {
+  async requestRide(
+    riderId: string,
+    dto: RequestRideDto,
+  ): Promise<RequestedRide> {
     // One live ride per rider: without this a client retry storm creates a
     // ride per tap, and each one reserves a different driver.
     const active = await this.rides.findOne({
@@ -299,7 +319,10 @@ export class RidesService {
         'Dispatch is temporarily unavailable — please try again',
       );
     }
-    return ride;
+    // The client must render this persisted quote, not its pre-request
+    // estimate. It is derived from the same locked surge and rate snapshot
+    // used in the driver offer and final settlement.
+    return { ...ride, estimatedFare: this.fareQuotePayload(quotedFare) };
   }
 
   /** Worker entry: one short tick or offer_check (no blocking while loops). */
@@ -974,7 +997,7 @@ export class RidesService {
     // a mid-flight failure rolls the ride back to in_progress so the driver
     // can simply retry completion. Locking ride -> route checkpoint matches
     // GPS ingestion's lock order, freezing one route snapshot before pricing.
-    const settlement = await this.rides.manager.transaction(async (em) => {
+    const settlement: any = await this.rides.manager.transaction(async (em) => {
       const lockedRide = await em.findOne(Ride, {
         where: { id: rideId },
         lock: { mode: 'pessimistic_write' },
@@ -1003,8 +1026,23 @@ export class RidesService {
         where: { rideId },
         lock: { mode: 'pessimistic_write' },
       });
-      const recordedDistM = checkpoint?.totalDistanceM ?? 0;
-      const routePoints = checkpoint ? [...checkpoint.points] : [];
+      if (!checkpoint) {
+        throw new UnprocessableEntityException(
+          'Trip meter is unavailable. Restore location access and record a GPS fix before completing the ride.',
+        );
+      }
+      if (checkpoint.hasGaps) {
+        throw new UnprocessableEntityException(
+          'Trip meter has an unresolved GPS gap. Reconnect and continue GPS tracking before completing the ride.',
+        );
+      }
+      if (Date.now() - checkpoint.lastFix.timestampMs > 120_000) {
+        throw new UnprocessableEntityException(
+          'Trip meter is stale. Restore location access and record a current GPS fix before completing the ride.',
+        );
+      }
+      const recordedDistM = checkpoint.totalDistanceM;
+      const routePoints = [...checkpoint.points];
       if (
         checkpoint &&
         routePoints[routePoints.length - 1]?.timestampMs !==
@@ -1014,25 +1052,10 @@ export class RidesService {
       }
       const actualRoute = routePoints.map(({ lat, lng }) => ({ lat, lng }));
 
-      // Preserve the existing fare policy while taking its inputs from one
-      // transactionally frozen checkpoint.
-      let actualDistanceM = recordedDistM;
-      if (actualDistanceM <= 0) {
-        const lastLoc = await this.readLiveDriverPoint(driverId);
-        if (lastLoc && lockedRide.pickup) {
-          const straightKm = haversineKm(lockedRide.pickup, lastLoc);
-          actualDistanceM = Math.max(
-            0,
-            Math.round(straightKm * 1.35 * 1000),
-          );
-        }
-      }
-      if (
-        lockedRide.distanceM &&
-        actualDistanceM > lockedRide.distanceM * 1.5
-      ) {
-        actualDistanceM = lockedRide.distanceM;
-      }
+      // A completed fare must be derived only from the transactionally frozen
+      // GPS meter. Never silently substitute straight-line or quoted distance:
+      // those are estimates and must not be stored as an actual trip distance.
+      const actualDistanceM = recordedDistM;
 
       const completedAt = new Date();
       const distanceKm = Math.max(0, actualDistanceM) / 1000;
@@ -1107,10 +1130,22 @@ export class RidesService {
         }),
       );
 
+      // The rider pays only the discounted cash amount; the matching Hebir
+      // wallet credit is created in this same transaction. DriverEarning stays
+      // at gross fare, so the credit replaces cash rather than adding income.
+      const adSettlement = this.adRewards
+        ? await this.adRewards.settleRide(em, lockedRide, fareRecord.total)
+        : {
+            appliedDiscountMinor: 0,
+            riderCashDueMinor: Math.round(Number(fareRecord.total) * 100),
+            driverHebirCreditMinor: 0,
+          };
+      const riderCashDue = (adSettlement.riderCashDueMinor / 100).toFixed(2);
+
       const settled = await this.farePayments.settleFare({
         rideId,
         riderId: lockedRide.riderId,
-        amountEtb: fareRecord.total,
+        amountEtb: riderCashDue,
         idempotencyKey: `fare:${rideId}`,
       });
       await em.save(
@@ -1118,7 +1153,7 @@ export class RidesService {
           userId: lockedRide.riderId,
           rideId,
           type: PaymentType.FARE,
-          amount: fareRecord.total,
+          amount: riderCashDue,
           idempotencyKey: `fare:${rideId}`,
           status: settled.status,
           providerReference: settled.providerReference,
@@ -1145,9 +1180,9 @@ export class RidesService {
       );
       await em.increment(DriverProfile, { userId: driverId }, 'totalTrips', 1);
 
-      return { fareTotal: fareRecord.total, actualDistanceM, actualDurationS };
+      return { fareTotal: fareRecord.total, riderCashDue, adSettlement, actualDistanceM, actualDurationS };
     });
-    const { fareTotal, actualDistanceM, actualDurationS } = settlement;
+    const { fareTotal, riderCashDue, adSettlement, actualDistanceM, actualDurationS } = settlement;
 
     const settledRide =
       (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
@@ -1155,6 +1190,13 @@ export class RidesService {
       rideId,
       status: RideStatus.COMPLETED,
       fare: fareTotal,
+      riderCashDue,
+      advertisingDiscount: adSettlement?.appliedDiscountMinor
+        ? (adSettlement.appliedDiscountMinor / 100).toFixed(2)
+        : '0.00',
+      driverHebirCredit: adSettlement?.driverHebirCreditMinor
+        ? (adSettlement.driverHebirCreditMinor / 100).toFixed(2)
+        : '0.00',
       fareBreakdown: {
         ...settledRide.fareBreakdown,
         actualDistanceKm: (settledRide.actualDistanceM ?? 0) / 1000,
@@ -1415,16 +1457,20 @@ export class RidesService {
       offerExpiresAt: ride.offerExpiresAt,
       distanceKm: Math.round(distanceKm * 1000) / 1000,
       durationMinutes: Math.round(durationMinutes * 10) / 10,
-      estimatedFare: {
-        total: fare.total,
-        initialFee: fare.initialFee,
-        distanceCharge: fare.distanceCharge,
-        timeCharge: fare.timeCharge,
-        waitCharge: fare.waitCharge,
-        vehicleMultiplier: fare.vehicleMultiplier,
-        surgeMultiplier: fare.surgeMultiplier,
-        platformFee: fare.platformFee,
-      },
+      estimatedFare: this.fareQuotePayload(fare),
+    };
+  }
+
+  private fareQuotePayload(fare: FareBreakdown): FareQuotePayload {
+    return {
+      total: fare.total,
+      initialFee: fare.initialFee,
+      distanceCharge: fare.distanceCharge,
+      timeCharge: fare.timeCharge,
+      waitCharge: fare.waitCharge,
+      vehicleMultiplier: fare.vehicleMultiplier,
+      surgeMultiplier: fare.surgeMultiplier,
+      platformFee: fare.platformFee,
     };
   }
 
@@ -1488,6 +1534,9 @@ export class RidesService {
     if (roles.includes(UserRole.DRIVER) || roles.includes(UserRole.ADMIN)) {
       const asDriver = await this.getActiveRideForDriver(userId);
       if (asDriver) return asDriver;
+      if (!roles.includes(UserRole.RIDER) && !roles.includes(UserRole.ADMIN)) {
+        return null;
+      }
     }
     return this.getActiveRideForRider(userId);
   }
@@ -2547,8 +2596,61 @@ export class RidesService {
       if (!wanted || wanted === 'any') return true;
       const vehicle = vehicleByDriver.get(profile.userId);
       if (!vehicle) return false;
-      return this.vehicleMatchesType(vehicle.capacity, wanted);
+      if (!this.vehicleMatchesType(vehicle.capacity, wanted)) return false;
+      // A driver with an XL vehicle can elect to accept standard trips too,
+      // or turn either category off. The preference is enforced server-side
+      // so an old app cannot receive an opted-out request.
+      const selected = profile.acceptedVehicleTypes;
+      return !selected || selected.includes(wanted);
     });
+  }
+
+  async getDriverServicePreferences(driverId: string) {
+    const [profile, vehicle] = await Promise.all([
+      this.driverProfiles.findOne({ where: { userId: driverId } }),
+      this.vehicles.findOne({ where: { driverId } }),
+    ]);
+    const eligibleVehicleTypes = vehicle
+      ? this.eligibleVehicleTypesForCapacity(vehicle.capacity)
+      : [];
+    const selected = (profile?.acceptedVehicleTypes ?? eligibleVehicleTypes)
+      .filter((type) => eligibleVehicleTypes.includes(type));
+    return { eligibleVehicleTypes, acceptedVehicleTypes: selected };
+  }
+
+  async setDriverServicePreferences(
+    driverId: string,
+    requestedTypes: string[],
+  ) {
+    const profile = await this.driverProfiles.findOne({
+      where: { userId: driverId },
+    });
+    if (!profile) throw new NotFoundException('Driver profile not found');
+    const vehicle = await this.vehicles.findOne({ where: { driverId } });
+    if (!vehicle) throw new BadRequestException('Add an approved vehicle first');
+    const eligibleVehicleTypes = this.eligibleVehicleTypesForCapacity(
+      vehicle.capacity,
+    );
+    const acceptedVehicleTypes = [...new Set(requestedTypes.map((type) =>
+      normalizeRideVehicleType(type),
+    ))];
+    if (
+      acceptedVehicleTypes.length === 0 ||
+      acceptedVehicleTypes.some((type) => !eligibleVehicleTypes.includes(type))
+    ) {
+      throw new BadRequestException(
+        'A service preference must match your verified vehicle capacity',
+      );
+    }
+    profile.acceptedVehicleTypes = acceptedVehicleTypes;
+    await this.driverProfiles.save(profile);
+    return { eligibleVehicleTypes, acceptedVehicleTypes };
+  }
+
+  private eligibleVehicleTypesForCapacity(capacity: number): string[] {
+    if (capacity <= 2) return ['moto'];
+    if (capacity >= 5) return ['sedan', 'suv'];
+    return ['sedan'];
   }
 
   /** Map request vehicleType to capacity bands on seeded fleet vehicles. */
