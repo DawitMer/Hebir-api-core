@@ -193,6 +193,16 @@ import { TripRouteRecorderService } from './trip-route-recorder.service';
 import { AdRewardsService } from '../ads/ads.service';
 import { PromotionsService } from '../promotions/promotions.service';
 
+type DispatchQueue = Pick<
+  DispatchQueueService,
+  | 'clearState'
+  | 'enqueueContinue'
+  | 'enqueueDispatch'
+  | 'enqueueOfferCheck'
+  | 'loadState'
+  | 'saveState'
+>;
+
 @Injectable()
 export class RidesService {
   private readonly logger = new Logger(RidesService.name);
@@ -224,7 +234,7 @@ export class RidesService {
     private readonly geocoding: GeocodingService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(forwardRef(() => DispatchQueueService))
-    private readonly dispatchQueue: DispatchQueueService,
+    private readonly dispatchQueue: DispatchQueue,
     @Inject(FARE_PAYMENT_PROVIDER)
     private readonly farePayments: PaymentProvider,
     private readonly routeRecorder: TripRouteRecorderService,

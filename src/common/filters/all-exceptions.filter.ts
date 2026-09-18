@@ -57,9 +57,16 @@ export class AllExceptionsFilter implements ExceptionFilter {
   private log(status: number, req: Request, exception: unknown) {
     const err =
       exception instanceof Error ? exception : new Error(String(exception));
+    const databaseError =
+      exception instanceof QueryFailedError
+        ? (exception.driverError as {
+            code?: string;
+            constraint?: string;
+          })
+        : undefined;
     const detail =
       exception instanceof QueryFailedError
-        ? 'Database request failed'
+        ? `Database request failed${databaseError?.code ? ` (${databaseError.code})` : ''}${databaseError?.constraint ? ` [${databaseError.constraint}]` : ''}`
         : err.message;
     const line = `${req.method ?? '?'} ${req.url?.split('?')[0] ?? '?'} ${status}: ${detail}`;
     if (status >= 500) {

@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { HealthController } from '../src/modules/admin/health.controller';
 import { REDIS_CLIENT } from '../src/redis/redis.module';
 import { LocationSvcClient } from '../src/common/location-svc/location-svc.client';
+import request from 'supertest';
 
 /**
  * Lightweight HTTP smoke without Postgres/Redis.
@@ -40,9 +41,6 @@ describe('Health (e2e smoke)', () => {
   });
 
   it('GET /healthz', async () => {
-    // CommonJS require — esModule interop with supertest + ts-jest is flaky.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const request = require('supertest');
     await request(app.getHttpServer())
       .get('/healthz')
       .expect(200)
@@ -53,8 +51,6 @@ describe('Health (e2e smoke)', () => {
   });
 
   it('GET /readyz', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const request = require('supertest');
     await request(app.getHttpServer())
       .get('/readyz')
       .expect(200)
@@ -70,8 +66,6 @@ describe('Health (e2e smoke)', () => {
   });
 
   it('GET /health', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const request = require('supertest');
     await request(app.getHttpServer())
       .get('/health')
       .expect(200)
@@ -82,8 +76,6 @@ describe('Health (e2e smoke)', () => {
   });
 
   it('GET /ready', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const request = require('supertest');
     await request(app.getHttpServer())
       .get('/ready')
       .expect(200)

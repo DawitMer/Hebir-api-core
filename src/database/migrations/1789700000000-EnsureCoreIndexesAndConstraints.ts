@@ -1,8 +1,6 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class EnsureCoreIndexesAndConstraints1789700000000
-  implements MigrationInterface
-{
+export class EnsureCoreIndexesAndConstraints1789700000000 implements MigrationInterface {
   name = 'EnsureCoreIndexesAndConstraints1789700000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

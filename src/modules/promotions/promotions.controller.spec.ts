@@ -1,6 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { PromotionsController } from './promotions.controller';
 import { PromotionsService } from './promotions.service';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
 
 describe('PromotionsController', () => {
   let controller: PromotionsController;
@@ -17,7 +19,12 @@ describe('PromotionsController', () => {
           },
         },
       ],
-    }).compile();
+    })
+      .overrideGuard(JwtAuthGuard)
+      .useValue({ canActivate: jest.fn() })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: jest.fn() })
+      .compile();
 
     controller = module.get<PromotionsController>(PromotionsController);
   });

@@ -6,6 +6,7 @@ import {
   JoinColumn,
   OneToOne,
   PrimaryGeneratedColumn,
+  Relation,
   UpdateDateColumn,
 } from 'typeorm';
 import { UserAccount } from '../../auth/entities/user-account.entity';
@@ -24,7 +25,7 @@ export class DriverSubscription {
 
   @OneToOne(() => UserAccount, { onDelete: 'CASCADE' })
   @JoinColumn()
-  driver: UserAccount;
+  driver: Relation<UserAccount>;
 
   @Index('UQ_driver_subscriptions_driverId', { unique: true })
   @Column()

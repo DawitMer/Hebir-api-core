@@ -124,20 +124,29 @@ describe('PromotionsService', () => {
         1000,
       );
       expect(result.appliedDiscountMinor).toBe(0);
+      expect(mockEntityManager.find).toHaveBeenCalledWith(PromotionClaim, {
+        where: { riderId: 'rider-1', status: PromotionClaimStatus.ACTIVE },
+        lock: { mode: 'pessimistic_write' },
+      });
     });
 
     it('should apply discount and cap at gross fare', async () => {
       const activeClaim = {
         id: 'claim-1',
         status: PromotionClaimStatus.ACTIVE,
-        promotion: {
-          isActive: true,
-          startsAt: new Date(0),
-          endsAt: new Date(2100, 1),
-          discountMinor: 1500,
-        },
+        promotionId: 'promo-1',
       };
-      mockEntityManager.find.mockResolvedValue([activeClaim]);
+      mockEntityManager.find
+        .mockResolvedValueOnce([activeClaim])
+        .mockResolvedValueOnce([
+          {
+            id: 'promo-1',
+            isActive: true,
+            startsAt: new Date(0),
+            endsAt: new Date(2100, 1),
+            discountMinor: 1500,
+          },
+        ]);
 
       const result = await service.applyPromotionToRide(
         mockEntityManager,

@@ -24,6 +24,10 @@ const DROPOFF = { lat: 9.0105, lng: 38.7612 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const auth = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } });
+const locAuth = () => {
+  const token = process.env.LOCATION_SVC_TOKEN;
+  return token ? { headers: { Authorization: `Bearer ${token}` } } : {};
+};
 
 let passed = 0;
 let failed = 0;
@@ -58,11 +62,14 @@ async function goOnline(driver: { token: string; userId: string }) {
   await axios
     .post(`${API}/subscription/dev-activate`, {}, auth(driver.token))
     .catch(() => undefined);
-  await axios.post(`${LOC}/drivers/offline`, { driverId: driver.userId }).catch(() => undefined);
-  await axios.post(`${LOC}/drivers/location`, {
-    driverId: driver.userId,
-    location: DRIVER_AT,
-  });
+  await axios
+    .post(`${LOC}/drivers/offline`, { driverId: driver.userId }, locAuth())
+    .catch(() => undefined);
+  await axios.post(
+    `${LOC}/drivers/location`,
+    { driverId: driver.userId, location: DRIVER_AT },
+    locAuth(),
+  );
   await axios.post(`${API}/drivers/presence`, { online: true }, auth(driver.token));
 }
 
@@ -92,17 +99,23 @@ async function presenceStatus(driverToken: string) {
 async function cleanup(driver: { token: string; userId: string }, riderToken: string, ride: any) {
   if (!ride?.id) return;
   if (ride.status === 'in_progress') {
-    await axios.post(`${LOC}/drivers/location`, {
-      driverId: driver.userId,
-      location: ride.dropoff || DROPOFF,
-    }).catch(() => undefined);
+    await axios
+      .post(
+        `${LOC}/drivers/location`,
+        { driverId: driver.userId, location: ride.dropoff || DROPOFF },
+        locAuth(),
+      )
+      .catch(() => undefined);
     await axios
       .post(`${API}/rides/${ride.id}/complete`, {}, auth(driver.token))
       .catch(() => undefined);
-    await axios.post(`${LOC}/drivers/location`, {
-      driverId: driver.userId,
-      location: DRIVER_AT,
-    }).catch(() => undefined);
+    await axios
+      .post(
+        `${LOC}/drivers/location`,
+        { driverId: driver.userId, location: DRIVER_AT },
+        locAuth(),
+      )
+      .catch(() => undefined);
   } else {
     await axios
       .patch(`${API}/rides/${ride.id}/status`, { status: 'cancelled' }, auth(riderToken))
@@ -187,11 +200,12 @@ async function main() {
     for (const status of ['arriving', 'in_progress']) {
       await axios.patch(`${API}/rides/${ride.id}/status`, { status }, auth(driver.token));
     }
-    await axios.post(`${LOC}/drivers/offline`, { driverId: driver.userId });
-    await axios.post(`${LOC}/drivers/location`, {
-      driverId: driver.userId,
-      location: DROPOFF,
-    });
+    await axios.post(`${LOC}/drivers/offline`, { driverId: driver.userId }, locAuth());
+    await axios.post(
+      `${LOC}/drivers/location`,
+      { driverId: driver.userId, location: DROPOFF },
+      locAuth(),
+    );
     const done = await axios.post(`${API}/rides/${ride.id}/complete`, {}, auth(driver.token));
     check('ride completed', done.data?.status === 'completed', done.data?.status);
     // completeRide() is deliberately idempotent (End Trip can be tapped twice /
@@ -209,10 +223,11 @@ async function main() {
   }
 
   console.log('\n--- timed-out offer frees the driver ---');
-  await axios.post(`${LOC}/drivers/location`, {
-    driverId: driver.userId,
-    location: DRIVER_AT,
-  });
+  await axios.post(
+    `${LOC}/drivers/location`,
+    { driverId: driver.userId, location: DRIVER_AT },
+    locAuth(),
+  );
   const ignored = await requestRide(rider.token);
   const secondOffer = await waitForOffer(driver.token);
   check('driver offered again', Boolean(secondOffer?.id));

@@ -29,6 +29,11 @@ import {
   MAX_DISPATCH_MS,
 } from './dispatch.types';
 
+type DispatchRideProcessor = Pick<
+  RidesService,
+  'processDispatchJob' | 'reapStalledDispatch'
+>;
+
 /**
  * Redis delayed-job queue for ride dispatch.
  * Jobs survive process restarts; each tick / offer_check is one short worker unit
@@ -43,7 +48,7 @@ export class DispatchQueueService implements OnModuleInit {
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @InjectRepository(Ride) private readonly rides: Repository<Ride>,
     @Inject(forwardRef(() => RidesService))
-    private readonly ridesService: RidesService,
+    private readonly ridesService: DispatchRideProcessor,
     private readonly metrics: MetricsService,
   ) {}
 

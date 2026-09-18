@@ -820,7 +820,6 @@ export class GovService {
     const currentMonthIdx = now.getUTCMonth();
     const currentMonthStr = `${year}-${String(currentMonthIdx + 1).padStart(2, '0')}`;
     const start = new Date(Date.UTC(year, 0, 1));
-    const currentMonthStart = new Date(Date.UTC(year, currentMonthIdx, 1));
     const nextMonthStart = new Date(Date.UTC(year, currentMonthIdx + 1, 1));
 
     // Aggregate in SQL strictly up to current month (ended months + current unsubmitted month)
@@ -839,29 +838,34 @@ export class GovService {
         SELECT t."createdAt", t.amount::numeric, 0, 0 FROM tips t
         WHERE t."driverId" = $1 AND t.status = 'succeeded'
       ), months AS (
-        SELECT generate_series($2::timestamptz, $3::timestamptz, interval '1 month') AS month
+        SELECT month::date AS month
+        FROM generate_series(
+          make_date($2::int, 1, 1),
+          make_date($2::int, $3::int, 1),
+          interval '1 month'
+        ) AS month
       )
-      SELECT to_char(m.month AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
-        COALESCE((SELECT SUM(gross) FROM revenue WHERE at >= m.month AND at < m.month + interval '1 month'), 0) AS gross,
-        COALESCE((SELECT SUM(fee) FROM revenue WHERE at >= m.month AND at < m.month + interval '1 month'), 0) AS fee,
-        COALESCE((SELECT SUM(trips) FROM revenue WHERE at >= m.month AND at < m.month + interval '1 month'), 0) AS trips,
+      SELECT to_char(m.month, 'YYYY-MM') AS month,
+        COALESCE((SELECT SUM(gross) FROM revenue WHERE at >= m.month::timestamp AT TIME ZONE 'UTC' AND at < (m.month + interval '1 month')::timestamp AT TIME ZONE 'UTC'), 0) AS gross,
+        COALESCE((SELECT SUM(fee) FROM revenue WHERE at >= m.month::timestamp AT TIME ZONE 'UTC' AND at < (m.month + interval '1 month')::timestamp AT TIME ZONE 'UTC'), 0) AS fee,
+        COALESCE((SELECT SUM(trips) FROM revenue WHERE at >= m.month::timestamp AT TIME ZONE 'UTC' AND at < (m.month + interval '1 month')::timestamp AT TIME ZONE 'UTC'), 0) AS trips,
         COALESCE((
           SELECT SUM(r."totalAmount"::numeric)
           FROM driver_monthly_expense_reports r
           WHERE r."driverId" = $1
-            AND r."reportingMonth" = to_char(m.month AT TIME ZONE 'UTC', 'YYYY-MM')
+            AND r."reportingMonth" = to_char(m.month, 'YYYY-MM')
             AND r.status IN ('approved', 'submitted', 'under_review')
         ), 0) AS expenses,
         (
           SELECT r.status
           FROM driver_monthly_expense_reports r
           WHERE r."driverId" = $1
-            AND r."reportingMonth" = to_char(m.month AT TIME ZONE 'UTC', 'YYYY-MM')
+            AND r."reportingMonth" = to_char(m.month, 'YYYY-MM')
           LIMIT 1
         ) AS report_status
       FROM months m ORDER BY m.month
     `,
-      [driverId, start, currentMonthStart],
+      [driverId, year, currentMonthIdx + 1],
     )) as Array<{
       month: string;
       gross: string;

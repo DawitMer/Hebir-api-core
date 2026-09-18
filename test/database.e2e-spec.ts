@@ -1,10 +1,12 @@
 import 'reflect-metadata';
 import { createHash, randomInt, randomUUID } from 'crypto';
-import { join } from 'path';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 import { DataSource, IsNull } from 'typeorm';
 import Redis from 'ioredis';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { PassportModule } from '@nestjs/passport';
 import { AuthService } from '../src/modules/auth/auth.service';
 import {
   AccountStanding,
@@ -49,11 +51,32 @@ import { PushService } from '../src/modules/push/push.service';
 import { DeviceToken } from '../src/modules/push/device-token.entity';
 import { GovService } from '../src/modules/gov/gov.service';
 import { GovAccessLog } from '../src/modules/gov/entities/access-log.entity';
-import { DriverExpense } from '../src/modules/gov/entities/driver-expense.entity';
+import {
+  DriverMonthlyExpenseReport,
+  MonthlyExpenseStatus,
+} from '../src/modules/gov/entities/driver-monthly-expense-report.entity';
 import { Booking } from '../src/modules/booking/entities/booking.entity';
 import { Trip } from '../src/modules/matching/entities/trip.entity';
 import { RiderRequest } from '../src/modules/matching/entities/rider-request.entity';
 import { DriverSubscription } from '../src/modules/subscription/entities/driver-subscription.entity';
+import { SubscriptionStatusHistory } from '../src/modules/subscription/entities/status-history.entity';
+import { PaymentEvent } from '../src/modules/subscription/entities/payment-event.entity';
+import { Incident } from '../src/modules/incidents/entities/incident.entity';
+import {
+  AdCampaign,
+  AdRewardEvent,
+  AdViewSession,
+  DriverCashoutRequest,
+  DriverWalletEntry,
+  RideAdSettlement,
+  RiderAdProfile,
+} from '../src/modules/ads/entities/ad-rewards.entity';
+import {
+  Promotion,
+  PromotionClaim,
+} from '../src/modules/promotions/entities/promotion.entity';
+import { Rating } from '../src/modules/ratings/entities/rating.entity';
+import { DriverExpense } from '../src/modules/gov/entities/driver-expense.entity';
 import { Test } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { RidesController } from '../src/modules/rides/rides.controller';
@@ -73,6 +96,52 @@ import { LocationController } from '../src/modules/location/location.controller'
 import { DriverLocationHistory } from '../src/modules/location/entities/driver-location-history.entity';
 import { NotificationsGateway } from '../src/modules/notifications/notifications.gateway';
 import { liveTrackKey } from '../src/modules/rides/ride-live-track';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const entities = [
+  AdCampaign,
+  AdRewardEvent,
+  AdViewSession,
+  AuditTrail,
+  Booking,
+  ComplianceAlert,
+  Configuration,
+  DeviceToken,
+  DocumentSubmission,
+  DriverCashoutRequest,
+  DriverEarning,
+  DriverExpense,
+  DriverLocationHistory,
+  DriverMonthlyExpenseReport,
+  DriverProfile,
+  DriverSubscription,
+  DriverVerification,
+  DriverWalletEntry,
+  FareRecord,
+  GovAccessLog,
+  Incident,
+  PaymentEvent,
+  PaymentRecord,
+  Promotion,
+  PromotionClaim,
+  Rating,
+  RefreshToken,
+  Ride,
+  RideAdSettlement,
+  RideMessage,
+  RideRouteCheckpoint,
+  RideStatusEvent,
+  RiderAdProfile,
+  RiderRequest,
+  SubscriptionStatusHistory,
+  SupportMessage,
+  SupportThread,
+  Tip,
+  Trip,
+  UserAccount,
+  Vehicle,
+];
 
 // Opt-in only: no dotenv, production AppModule, external messages or PSP calls.
 const databaseUrl = process.env.HEBIR_TEST_DATABASE_URL;
@@ -168,8 +237,8 @@ run('isolated PostgreSQL + Redis production-contract regressions', () => {
     db = await new DataSource({
       type: 'postgres',
       url: databaseUrl,
-      entities: [join(__dirname, '../src/**/*.entity.ts')],
-      migrations: [join(__dirname, '../src/database/migrations/*.ts')],
+      entities,
+      migrations: [join(__dirname, '../dist/src/database/migrations/*.js')],
       synchronize: false,
       migrationsTransactionMode: 'each',
     }).initialize();
@@ -235,7 +304,7 @@ run('isolated PostgreSQL + Redis production-contract regressions', () => {
     );
     government = new GovService(
       repo(GovAccessLog),
-      repo(DriverExpense),
+      repo(DriverMonthlyExpenseReport),
       repo(Booking),
       repo(DriverSubscription),
       repo(Trip),
@@ -245,8 +314,11 @@ run('isolated PostgreSQL + Redis production-contract regressions', () => {
       repo(Ride),
       repo(FareRecord),
       repo(DriverVerification),
+      notifications as never,
+      { send: jest.fn().mockResolvedValue(undefined) } as never,
     );
     const module = await Test.createTestingModule({
+      imports: [PassportModule.register({ defaultStrategy: 'jwt' })],
       controllers: [RidesController, KycController],
       providers: [
         JwtStrategy,
@@ -986,14 +1058,12 @@ run('isolated PostgreSQL + Redis production-contract regressions', () => {
         total: '10',
       })),
     );
-    await db.getRepository(DriverExpense).insert(
-      Array.from({ length: 101 }, () => ({
-        driverId: driver.id,
-        category: 'Fuel',
-        amount: '1',
-        incurredAt: completedAt,
-      })),
-    );
+    await db.getRepository(DriverMonthlyExpenseReport).save({
+      driverId: driver.id,
+      reportingMonth: `${year}-02`,
+      status: MonthlyExpenseStatus.APPROVED,
+      totalAmount: '101',
+    });
     await db
       .getRepository(Ride)
       .update(trip.id, { completedAt: new Date(Date.UTC(year - 1, 1, 1)) });
@@ -1012,7 +1082,10 @@ run('isolated PostgreSQL + Redis production-contract regressions', () => {
       netTaxableEarnings: 909,
       fiscalYear: year,
     });
-    expect(report.monthlyBreakdown).toHaveLength(12);
+    expect(report.monthlyBreakdown).toHaveLength(new Date().getUTCMonth() + 1);
+    expect(new Set(report.monthlyBreakdown.map((row) => row.month)).size).toBe(
+      report.monthlyBreakdown.length,
+    );
     const disclosure = await government.getDriverTrips(driver.id);
     expect(disclosure.trips).toHaveLength(100);
     expect(disclosure.totalTrips).toBe(102);

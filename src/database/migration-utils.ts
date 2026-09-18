@@ -17,4 +17,3 @@ export async function bootstrappedFromBaseline(
   );
   return Number(rows[0]?.cnt ?? 0) > 0;
 }
-

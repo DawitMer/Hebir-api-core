@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
@@ -13,11 +13,12 @@ import { OtpService } from './otp.service';
 import { SmsService } from './sms.service';
 import { FirebaseService } from './firebase/firebase.service';
 
+@Global()
 @Module({
   imports: [
     ScheduleModule.forRoot(),
     TypeOrmModule.forFeature([UserAccount, RefreshToken]),
-    PassportModule,
+    PassportModule.register({ defaultStrategy: 'jwt' }),
     ConfigModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -38,6 +39,13 @@ import { FirebaseService } from './firebase/firebase.service';
     SmsService,
     FirebaseService,
   ],
-  exports: [AuthService, OtpService, FirebaseService, TypeOrmModule],
+  exports: [
+    AuthService,
+    OtpService,
+    FirebaseService,
+    TypeOrmModule,
+    JwtModule,
+    PassportModule,
+  ],
 })
 export class AuthModule {}

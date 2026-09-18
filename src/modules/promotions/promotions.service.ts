@@ -5,7 +5,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { QueryFailedError, Repository } from 'typeorm';
+import { In, QueryFailedError, Repository } from 'typeorm';
 import {
   Promotion,
   PromotionClaim,
@@ -191,16 +191,24 @@ export class PromotionsService {
   ) {
     const claims = await em.find(PromotionClaim, {
       where: { riderId, status: PromotionClaimStatus.ACTIVE },
-      relations: ['promotion'],
       lock: { mode: 'pessimistic_write' },
     });
+    const promotionIds = [...new Set(claims.map((claim) => claim.promotionId))];
+    const promotions = promotionIds.length
+      ? await em.find(Promotion, { where: { id: In(promotionIds) } })
+      : [];
+    const promotionsById = new Map<string, Promotion>(
+      promotions.map((promotion) => [promotion.id, promotion]),
+    );
 
-    const validClaim = claims.find((c) => {
+    const validClaim = claims.find((claim) => {
+      const promotion = promotionsById.get(claim.promotionId);
+      if (!promotion) return false;
       const now = new Date();
       return (
-        c.promotion.isActive &&
-        now >= c.promotion.startsAt &&
-        now <= c.promotion.endsAt
+        promotion.isActive &&
+        now >= promotion.startsAt &&
+        now <= promotion.endsAt
       );
     });
 
@@ -209,7 +217,7 @@ export class PromotionsService {
     }
 
     const discount = Math.min(
-      validClaim.promotion.discountMinor,
+      promotionsById.get(validClaim.promotionId)!.discountMinor,
       grossFareMinor,
     );
 

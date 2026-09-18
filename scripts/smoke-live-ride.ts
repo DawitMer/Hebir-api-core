@@ -124,6 +124,13 @@ async function main() {
     console.log(`transition -> ${data.status}`);
   }
 
+  // Send the final fix through api-core so it is both published to the
+  // location sidecar and durably recorded by the trip meter used at settlement.
+  await axios.post(
+    `${API}/drivers/location`,
+    { lat: DROPOFF.lat, lng: DROPOFF.lng },
+    auth(driver.token),
+  );
   await axios.post(`${LOC}/drivers/offline`, { driverId: driver.userId }, locAuth());
   await axios.post(`${LOC}/drivers/location`, {
     driverId: driver.userId,

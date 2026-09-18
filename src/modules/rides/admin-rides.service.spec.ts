@@ -40,7 +40,10 @@ describe('AdminRidesService', () => {
         { provide: getRepositoryToken(DriverProfile), useValue: {} },
         { provide: NotificationsGateway, useValue: notificationsGateway },
         { provide: DispatchQueueService, useValue: dispatchQueueService },
-        { provide: REDIS_CLIENT, useValue: { eval: jest.fn(), del: jest.fn().mockResolvedValue(1) } },
+        {
+          provide: REDIS_CLIENT,
+          useValue: { eval: jest.fn(), del: jest.fn().mockResolvedValue(1) },
+        },
         { provide: PromotionsService, useValue: promotionsService },
       ],
     }).compile();

@@ -5,6 +5,7 @@ import {
   Index,
   OneToOne,
   PrimaryGeneratedColumn,
+  Relation,
   UpdateDateColumn,
 } from 'typeorm';
 import { DriverSubscription } from '../../subscription/entities/driver-subscription.entity';
@@ -93,7 +94,7 @@ export class UserAccount {
   savedPlaces: Array<Record<string, unknown>> | null;
 
   @OneToOne(() => DriverSubscription, (subscription) => subscription.driver)
-  subscription?: DriverSubscription;
+  subscription?: Relation<DriverSubscription>;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
