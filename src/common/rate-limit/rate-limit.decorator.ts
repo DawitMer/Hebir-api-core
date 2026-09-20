@@ -101,6 +101,27 @@ export const RateLimitPresets = {
     windowSec: 60,
     keyBy: 'user' as const,
   },
+  /**
+   * KYC document presign / body upload / confirm. A driver uploads a handful
+   * of documents per application; this stops a scripted client from filling
+   * private storage or hammering the presigner.
+   */
+  kycUpload: {
+    prefix: 'rl:kyc-upload',
+    limit: 20,
+    windowSec: 60,
+    keyBy: 'user' as const,
+  },
+  /**
+   * Places autocomplete / details proxy an external geocoder that bills per
+   * call; a typing user needs a few per second at most.
+   */
+  places: {
+    prefix: 'rl:places',
+    limit: 90,
+    windowSec: 60,
+    keyBy: 'user' as const,
+  },
   /** Public fare quotes (display only — settlement is server-side). */
   fareEstimate: {
     prefix: 'rl:fare-estimate',

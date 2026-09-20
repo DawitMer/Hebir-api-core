@@ -130,7 +130,10 @@ describe('RidesService & Dispatch Concurrency Suite', () => {
       { find: jest.fn().mockResolvedValue([]) } as never,
       { find: jest.fn().mockResolvedValue([]) } as never,
       { find: jest.fn().mockResolvedValue([]) } as never,
-      { find: jest.fn().mockResolvedValue([]) } as never,
+      {
+        find: jest.fn().mockResolvedValue([]),
+        findOne: jest.fn().mockResolvedValue({ standing: 'good' }),
+      } as never,
       driverProfiles as never,
       { find: jest.fn().mockResolvedValue([]) } as never,
       { find: jest.fn().mockResolvedValue([]) } as never,

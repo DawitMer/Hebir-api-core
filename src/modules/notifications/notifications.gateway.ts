@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import Redis from 'ioredis';
 import { REDIS_CLIENT } from '../../redis/redis.module';
 import { buildSocketCors } from '../../config/security.config';
+import { treatAsProductionRuntime } from '../../config/public-api-host';
 import { AuthService } from '../auth/auth.service';
 import { isAccountClosed } from '../auth/entities/user-account.entity';
 import { PushService } from '../push/push.service';
@@ -51,8 +52,10 @@ export class NotificationsGateway
     // Escape hatch for local demos whose clients still connect with only a
     // userId. Never honoured in production.
     this.allowUnauthenticated =
-      config.get<string>('NODE_ENV') !== 'production' &&
-      config.get<string>('WS_ALLOW_UNAUTHENTICATED') === 'true';
+      !treatAsProductionRuntime(
+        config.get<string>('NODE_ENV'),
+        config.get<string>('PUBLIC_API_BASE_URL'),
+      ) && config.get<string>('WS_ALLOW_UNAUTHENTICATED') === 'true';
     if (this.allowUnauthenticated) {
       this.logger.warn(
         'WS_ALLOW_UNAUTHENTICATED=true — socket clients may self-declare userId (dev only)',

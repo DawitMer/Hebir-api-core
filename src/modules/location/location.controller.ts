@@ -426,14 +426,16 @@ export class LocationController {
     return { drivers: [], limit };
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RedisRateLimitGuard)
+  @RateLimit(RateLimitPresets.places)
   @Get('location/places/autocomplete')
   async autocompletePlaces(@Query('q') query: string) {
     if (!query || !query.trim()) return [];
     return this.geocodingService.autocompletePlaces(query);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RedisRateLimitGuard)
+  @RateLimit(RateLimitPresets.places)
   @Get('location/places/details')
   async getPlaceDetails(@Query('placeId') placeId: string) {
     if (!placeId) throw new BadRequestException('placeId is required');

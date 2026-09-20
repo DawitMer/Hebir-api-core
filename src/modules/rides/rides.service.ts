@@ -22,6 +22,10 @@ import {
   Repository,
 } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
+import {
+  isDriverKycEnforced,
+  treatAsProductionRuntime,
+} from '../../config/public-api-host';
 import { createHash, randomInt } from 'crypto';
 import Redis from 'ioredis';
 import { REDIS_CLIENT } from '../../redis/redis.module';
@@ -39,7 +43,11 @@ import {
 } from './entities/driver-earning.entity';
 import { PaymentRecord, PaymentType } from './entities/payment-record.entity';
 import { Tip } from '../tips/entities/tip.entity';
-import { UserAccount, UserRole } from '../auth/entities/user-account.entity';
+import {
+  isMarketplaceBlocked,
+  UserAccount,
+  UserRole,
+} from '../auth/entities/user-account.entity';
 import { RequestRideDto } from './dto/request-ride.dto';
 import { ListRideMessagesDto } from './dto/list-ride-messages.dto';
 import { DriverInitiatedRideDto } from './dto/driver-initiated-ride.dto';
@@ -68,9 +76,11 @@ import {
 } from './ride-live-track';
 import {
   ARRIVE_RADIUS_M,
+  COMPLETE_RADIUS_M,
   START_RADIUS_M,
   metresBetween,
 } from './ride-geofence';
+import { settleTripMeterDistance } from './gps-gap-settlement';
 import {
   DRIVER_ONLY_TRANSITIONS,
   isClientRideTransitionAllowed,
@@ -677,6 +687,7 @@ export class RidesService {
     if (ride.offerDriverId !== driverId || ride.status !== RideStatus.OFFERED) {
       throw new ConflictException('This ride is not currently offered to you');
     }
+    await this.assertDriverMayWork(driverId);
     if (!(await this.subscriptionService.mayAccessMarketplace(driverId))) {
       try {
         await this.declineOffer(driverId, rideId);
@@ -1008,6 +1019,14 @@ export class RidesService {
       );
     }
 
+    await this.assertDriverWithin(
+      driverId,
+      ride.dropoff,
+      COMPLETE_RADIUS_M,
+      'end the trip',
+      'destination',
+    );
+
     // Status flip + fare + payment + earning + driver release are atomic:
     // a mid-flight failure rolls the ride back to in_progress so the driver
     // can simply retry completion. Locking ride -> route checkpoint matches
@@ -1046,16 +1065,6 @@ export class RidesService {
           'Trip meter is unavailable. Restore location access and record a GPS fix before completing the ride.',
         );
       }
-      if (checkpoint.hasGaps) {
-        throw new UnprocessableEntityException(
-          'Trip meter has an unresolved GPS gap. Reconnect and continue GPS tracking before completing the ride.',
-        );
-      }
-      if (Date.now() - checkpoint.lastFix.timestampMs > 120_000) {
-        throw new UnprocessableEntityException(
-          'Trip meter is stale. Restore location access and record a current GPS fix before completing the ride.',
-        );
-      }
       const recordedDistM = checkpoint.totalDistanceM;
       const routePoints = [...checkpoint.points];
       if (
@@ -1067,10 +1076,15 @@ export class RidesService {
       }
       const actualRoute = routePoints.map(({ lat, lng }) => ({ lat, lng }));
 
-      // A completed fare must be derived only from the transactionally frozen
-      // GPS meter. Never silently substitute straight-line or quoted distance:
-      // those are estimates and must not be stored as an actual trip distance.
-      const actualDistanceM = recordedDistM;
+      const billedMeter = settleTripMeterDistance({
+        recordedDistanceM: recordedDistM,
+        lastFix: checkpoint.lastFix,
+        dropoff: lockedRide.dropoff,
+        quotedDistanceM: lockedRide.distanceM,
+        hasGaps: checkpoint.hasGaps,
+        lastFixAgeMs: Date.now() - checkpoint.lastFix.timestampMs,
+      });
+      const actualDistanceM = billedMeter.distanceM;
 
       const completedAt = new Date();
       const distanceKm = Math.max(0, actualDistanceM) / 1000;
@@ -1093,6 +1107,14 @@ export class RidesService {
         },
         lockedRide.quotedFareRates,
       );
+      const farePayload = billedMeter.estimated
+        ? {
+            ...fareBreakdown,
+            gpsGapEstimated: true,
+            recordedDistanceM: billedMeter.recordedDistanceM,
+            billedDistanceM: billedMeter.distanceM,
+          }
+        : fareBreakdown;
 
       const completed = await em.update(
         Ride,
@@ -1103,8 +1125,8 @@ export class RidesService {
           actualDistanceM,
           actualDurationS,
           actualRoute: actualRoute.length > 0 ? actualRoute : null,
-          fare: String(fareBreakdown.total),
-          fareBreakdown: fareBreakdown as unknown as Record<string, unknown>,
+          fare: String(farePayload.total),
+          fareBreakdown: farePayload as unknown as Record<string, unknown>,
           pricingVersion: 'v1',
           offerDriverId: null,
           offerExpiresAt: null,
@@ -1646,6 +1668,12 @@ export class RidesService {
     phoneNumber: string,
     driverLocation: GeoPoint,
   ) {
+    await this.assertDriverMayWork(driverId);
+    if (!(await this.subscriptionService.mayAccessMarketplace(driverId))) {
+      throw new ForbiddenException(
+        'Active subscription required to look up riders',
+      );
+    }
     if (phoneNumber.trim() === '') {
       throw new NotFoundException('Rider not found');
     }
@@ -1720,6 +1748,7 @@ export class RidesService {
     driverId: string,
     dto: DriverInitiatedRideDto,
   ): Promise<EnrichedRide> {
+    await this.assertDriverMayWork(driverId);
     const mayDrive =
       await this.subscriptionService.mayAccessMarketplace(driverId);
     if (!mayDrive) {
@@ -2462,7 +2491,12 @@ export class RidesService {
   ): Promise<void> {
     const point = await this.readLiveDriverPoint(driverId);
     if (!point) {
-      if (this.config.get<string>('NODE_ENV') === 'production') {
+      if (
+        treatAsProductionRuntime(
+          this.config.get<string>('NODE_ENV'),
+          this.config.get<string>('PUBLIC_API_BASE_URL'),
+        )
+      ) {
         throw new UnprocessableEntityException(
           `GPS is required to ${action}. Wait for a location fix and try again.`,
         );
@@ -3103,10 +3137,23 @@ export class RidesService {
   }
 
   private isKycEnforced(): boolean {
-    const explicit = this.config.get<string>('REQUIRE_DRIVER_KYC');
-    if (explicit === 'true') return true;
-    if (explicit === 'false') return false;
-    return this.config.get<string>('NODE_ENV') === 'production';
+    return isDriverKycEnforced({
+      requireDriverKyc: this.config.get<string>('REQUIRE_DRIVER_KYC'),
+      nodeEnv: this.config.get<string>('NODE_ENV'),
+      publicApiBaseUrl: this.config.get<string>('PUBLIC_API_BASE_URL'),
+    });
+  }
+
+  private async assertDriverMayWork(driverId: string): Promise<void> {
+    const account = await this.users.findOne({
+      where: { id: driverId },
+      select: { id: true, standing: true },
+    });
+    if (!account || isMarketplaceBlocked(account.standing)) {
+      throw new ForbiddenException(
+        'This account cannot go online or take trips',
+      );
+    }
   }
 
   private async assertKycAllowsOnline(driverId: string): Promise<void> {
@@ -3171,6 +3218,7 @@ export class RidesService {
     connectedAccountId?: string,
   ) {
     if (online) {
+      await this.assertDriverMayWork(driverId);
       const mayDrive =
         await this.subscriptionService.mayAccessMarketplace(driverId);
       if (!mayDrive) {

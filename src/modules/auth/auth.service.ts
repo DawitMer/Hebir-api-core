@@ -28,6 +28,7 @@ import { OtpLoginDto } from './dto/otp-login.dto';
 import { OtpService } from './otp.service';
 import { FirebaseLoginDto } from './dto/firebase-login.dto';
 import { FirebaseService } from './firebase/firebase.service';
+import { treatAsProductionRuntime } from '../../config/public-api-host';
 import { normalizeEthiopiaE164 } from '../../common/phone/ethiopia-phone';
 
 const SALT_ROUNDS = 10;
@@ -64,7 +65,10 @@ export class AuthService {
   async register(dto: RegisterDto) {
     const requireOtp =
       this.config.get<string>('AUTH_REQUIRE_OTP') === 'true' ||
-      this.config.get<string>('NODE_ENV') === 'production' ||
+      treatAsProductionRuntime(
+        this.config.get<string>('NODE_ENV'),
+        this.config.get<string>('PUBLIC_API_BASE_URL'),
+      ) ||
       !dto.password;
     if (requireOtp) {
       await this.otp.consumeSession(dto.otpSessionToken, dto.phoneNumber);
@@ -183,13 +187,6 @@ export class AuthService {
           roles: roles.length > 0 ? roles : [UserRole.RIDER],
         }),
       );
-    } else if (
-      dto.roles?.includes(UserRole.DRIVER) &&
-      !user.roles?.includes(UserRole.DRIVER)
-    ) {
-      user.roles = [...(user.roles ?? []), UserRole.DRIVER];
-      user = await this.users.save(user);
-      this.authContextCache.delete(user.id);
     }
 
     if (isAccountClosed(user.standing)) {

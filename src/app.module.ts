@@ -32,21 +32,25 @@ import { LocationSvcModule } from './common/location-svc/location-svc.module';
 import { GeocodingModule } from './common/geocoding/geocoding.module';
 import { AdsModule } from './modules/ads/ads.module';
 import { PromotionsModule } from './modules/promotions/promotions.module';
+import { treatAsProductionFromEnv } from './config/public-api-host';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
       validate,
-      // Production secrets come from Secrets Manager / mounted file — not .env on disk.
-      ignoreEnvFile: process.env.NODE_ENV === 'production',
+      // Production / public-host secrets come from the process env — not .env on disk.
+      ignoreEnvFile: treatAsProductionFromEnv(process.env),
       envFilePath: ['.env'],
     }),
     LoggerModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
-        const isProd = config.get<string>('NODE_ENV') === 'production';
+        const isProd = treatAsProductionFromEnv({
+          NODE_ENV: config.get<string>('NODE_ENV'),
+          PUBLIC_API_BASE_URL: config.get<string>('PUBLIC_API_BASE_URL'),
+        });
         const level =
           config.get<string>('LOG_LEVEL') ?? (isProd ? 'info' : 'debug');
         return {

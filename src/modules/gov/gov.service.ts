@@ -114,6 +114,8 @@ export class GovService {
     const tin = sanitizeSearchTerm(filters?.tin ?? '');
     const name = sanitizeSearchTerm(filters?.name ?? '');
     const searching = Boolean(q || tin || name);
+    // TypeORM take(0) removes the limit; never issue an unfiltered roster query.
+    if (!searching) return [];
 
     const qb = this.users
       .createQueryBuilder('u')
@@ -139,11 +141,8 @@ export class GovService {
     const drivers = await qb
       .orderBy('u.fullName', 'ASC')
       .addOrderBy('u.createdAt', 'DESC')
-      .take(searching ? MAX_SEARCH_HITS : 0)
+      .take(MAX_SEARCH_HITS)
       .getMany();
-
-    // Unfiltered list is intentionally empty at fleet scale — use tin/name/q.
-    if (!searching) return [];
 
     return this.mapDriverRows(drivers);
   }

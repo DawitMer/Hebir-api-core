@@ -12,11 +12,13 @@ import {
 } from './config/security.config';
 import { startTracingIfEnabled } from './observability/tracing';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
-import { AppModule } from './app.module';
 
 async function bootstrap() {
   await loadSecretsIntoEnv();
   await startTracingIfEnabled();
+  // ConfigModule.forRoot validates during module evaluation. Load secrets
+  // before importing AppModule so mounted/AWS credentials are available.
+  const { AppModule } = await import('./app.module');
 
   const app = await NestFactory.create(AppModule, {
     rawBody: true,

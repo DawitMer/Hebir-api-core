@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule, TypeOrmModuleOptions } from '@nestjs/typeorm';
 import * as path from 'path';
 import { resolvePoolOptions } from './pool.config';
+import { resolveTypeormSynchronize } from '../config/public-api-host';
 
 /**
  * Schema changes go through TypeORM migrations only.
@@ -12,8 +13,11 @@ import { resolvePoolOptions } from './pool.config';
  * Run DDL via CLI against DATABASE_DIRECT_URL when available.
  */
 function resolveSynchronize(config: ConfigService): boolean {
-  if (config.get<string>('NODE_ENV') === 'production') return false;
-  return config.get<string>('TYPEORM_SYNCHRONIZE') === 'true';
+  return resolveTypeormSynchronize({
+    nodeEnv: config.get<string>('NODE_ENV'),
+    publicApiBaseUrl: config.get<string>('PUBLIC_API_BASE_URL'),
+    typeormSynchronize: config.get<string>('TYPEORM_SYNCHRONIZE'),
+  });
 }
 
 @Module({

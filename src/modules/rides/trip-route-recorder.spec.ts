@@ -46,4 +46,14 @@ describe('route sample validation (SQL persistence is covered by database.e2e)',
         .hasGap,
     ).toBe(true);
   });
+  it('flags a long teleport as a gap instead of a billable jump', () => {
+    const result = validateRouteSample(last, {
+      ...last,
+      lat: 9.0706,
+      timestampMs: 200000,
+    });
+    expect(result.reason).toBe('impossible_speed_jump');
+    expect(result.hasGap).toBe(true);
+    expect(result.distanceM).toBe(0);
+  });
 });

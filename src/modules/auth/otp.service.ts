@@ -15,6 +15,7 @@ import { REDIS_CLIENT } from '../../redis/redis.module';
 import { SmsService } from './sms.service';
 import { IsString, Length, Matches } from 'class-validator';
 import { ETHIOPIA_E164 } from './dto/register.dto';
+import { treatAsProductionRuntime } from '../../config/public-api-host';
 
 export class RequestOtpDto {
   @Matches(ETHIOPIA_E164, {
@@ -49,8 +50,9 @@ const PHONE_REQUEST_WINDOW_SEC = 3600;
 
 /**
  * Phone OTP for signup/login step-up. Codes are stored hashed in Redis.
- * Without an SMS provider, production refuses to send; development may
- * return `debugCode` so local demos still work.
+ * Debug codes and the universal sandbox OTP are allowed only on local
+ * development/test — never when PUBLIC_API_BASE_URL is the live Hebir host,
+ * even if NODE_ENV was mis-set to development.
  */
 @Injectable()
 export class OtpService {
@@ -63,28 +65,26 @@ export class OtpService {
   ) {}
 
   async request(phoneNumber: string) {
-    const isProd = this.config.get<string>('NODE_ENV') === 'production';
     const smsConfigured = Boolean(
       this.config.get<string>('SMS_PROVIDER')?.trim(),
     );
+    const debug = this.allowDebugOtp();
 
-    if (isProd && !smsConfigured) {
+    if (!smsConfigured && !debug) {
       throw new ServiceUnavailableException(
-        'NOT VERIFIED — PRODUCTION SMS PROVIDER REQUIRED (set SMS_PROVIDER)',
+        'Phone sign-in is temporarily unavailable. Try again later.',
       );
     }
 
     await this.enforceResendCooldown(phoneNumber);
     await this.enforcePhoneRequestLimit(phoneNumber);
 
-    const nodeEnv = this.config.get<string>('NODE_ENV');
-    const isDevOrTest = nodeEnv === 'development' || nodeEnv === 'test';
-    const code = isDevOrTest ? '123456' : String(randomInt(100000, 999999));
+    const code = debug ? '123456' : String(randomInt(100000, 999999));
     const otpKey = `${OTP_PREFIX}${phoneNumber}`;
     const hash = this.hash(phoneNumber, code);
     await this.redis.setex(otpKey, OTP_TTL_SEC, hash);
 
-    if (isDevOrTest) {
+    if (debug) {
       this.logger.log(`[DEV OTP] Phone: ${phoneNumber} (code omitted in prod)`);
       return { sent: true, expiresInSec: OTP_TTL_SEC, debugCode: code };
     }
@@ -99,11 +99,8 @@ export class OtpService {
     const key = `${OTP_PREFIX}${phoneNumber}`;
     const failKey = `otp:fail:${phoneNumber}`;
 
-    const nodeEnv = this.config.get<string>('NODE_ENV');
-    const isDevOrTest = nodeEnv === 'development' || nodeEnv === 'test';
-
-    // Allow universal sandbox OTP '123456' in development/test
-    if (isDevOrTest && code === '123456') {
+    // Universal sandbox OTP only on local debug — never on the public API.
+    if (this.allowDebugOtp() && code === '123456') {
       await this.redis.del(key);
       await this.redis.del(failKey);
       return;
@@ -197,6 +194,19 @@ export class OtpService {
         `OTP SMS delivery failed for ${phoneNumber}: ${(err as Error).message}`,
       );
     }
+  }
+
+  private allowDebugOtp(): boolean {
+    if (
+      treatAsProductionRuntime(
+        this.config.get<string>('NODE_ENV'),
+        this.config.get<string>('PUBLIC_API_BASE_URL'),
+      )
+    ) {
+      return false;
+    }
+    const nodeEnv = this.config.get<string>('NODE_ENV');
+    return nodeEnv === 'development' || nodeEnv === 'test';
   }
 
   private hash(phoneNumber: string, code: string) {

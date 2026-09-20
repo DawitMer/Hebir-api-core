@@ -32,4 +32,21 @@ describe('PromotionsController', () => {
   it('should be defined', () => {
     expect(controller).toBeDefined();
   });
+
+  it('uses the authenticated userId for listing and claiming promotions', async () => {
+    const service = {
+      getAvailablePromotions: jest.fn().mockResolvedValue([]),
+      claimPromotion: jest.fn().mockResolvedValue({ id: 'claim' }),
+    };
+    const subject = new PromotionsController(service as never);
+    // JwtStrategy returns userId, never id.
+    const authenticatedUser = { userId: 'rider-123' };
+    await subject.listPromotions(authenticatedUser);
+    await subject.claimPromotion('promotion-123', authenticatedUser);
+    expect(service.getAvailablePromotions).toHaveBeenCalledWith('rider-123');
+    expect(service.claimPromotion).toHaveBeenCalledWith(
+      'rider-123',
+      'promotion-123',
+    );
+  });
 });

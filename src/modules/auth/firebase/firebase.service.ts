@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
+import { treatAsProductionRuntime } from '../../../config/public-api-host';
 
 export interface VerifiedFirebaseToken {
   uid: string;
@@ -136,9 +137,15 @@ export class FirebaseService implements OnModuleInit {
       throw new UnauthorizedException('Missing or invalid Firebase ID token');
     }
 
-    // Test / Dev-mode deterministic tokens (e.g. test-token:+251911223344 or mock-firebase:phone:uid)
+    // Test / local-only deterministic tokens. Never honoured on the public API,
+    // even if NODE_ENV was mis-set to development.
+    const productionLike = treatAsProductionRuntime(
+      this.config.get<string>('NODE_ENV') ?? process.env.NODE_ENV,
+      this.config.get<string>('PUBLIC_API_BASE_URL') ??
+        process.env.PUBLIC_API_BASE_URL,
+    );
     if (
-      process.env.NODE_ENV !== 'production' &&
+      !productionLike &&
       (idToken.startsWith('test-token:') ||
         idToken.startsWith('mock-firebase:'))
     ) {

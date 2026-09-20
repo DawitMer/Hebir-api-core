@@ -10,6 +10,7 @@ import {
   ValidateIf,
   validateSync,
 } from 'class-validator';
+import { treatAsProductionFromEnv } from './public-api-host';
 
 class EnvironmentVariables {
   @IsIn(['development', 'production', 'test', 'staging'])
@@ -434,7 +435,12 @@ export function validate(config: Record<string, unknown>) {
     );
   }
 
-  if (validatedConfig.NODE_ENV === 'production') {
+  const productionLike = treatAsProductionFromEnv({
+    NODE_ENV: validatedConfig.NODE_ENV,
+    PUBLIC_API_BASE_URL: validatedConfig.PUBLIC_API_BASE_URL,
+  });
+
+  if (productionLike) {
     const weak = PRODUCTION_SECRET_KEYS.filter((key) => {
       const value = validatedConfig[key];
       return !value || value.length < 24 || PLACEHOLDER_SECRET.test(value);
@@ -444,9 +450,9 @@ export function validate(config: Record<string, unknown>) {
         `Refusing to start: ${weak.join(', ')} must be at least 24 characters and not a placeholder`,
       );
     }
-    if (!validatedConfig.CORS_ORIGINS?.trim()) {
+    if (validatedConfig.TYPEORM_SYNCHRONIZE === 'true') {
       throw new Error(
-        'Refusing to start: CORS_ORIGINS must be set in production (comma-separated portal origins)',
+        'Refusing to start: TYPEORM_SYNCHRONIZE must be false in production (use migrations)',
       );
     }
     if (
@@ -473,6 +479,16 @@ export function validate(config: Record<string, unknown>) {
     if (!redisUrl && redisLoopback) {
       throw new Error(
         'Refusing to start: set REDIS_URL (or a non-loopback REDIS_HOST) in production',
+      );
+    }
+  }
+
+  // SMS + explicit CORS remain NODE_ENV=production-only so a public-host
+  // overlay can boot (OTP then 503s) before SMS credentials exist.
+  if (validatedConfig.NODE_ENV === 'production') {
+    if (!validatedConfig.CORS_ORIGINS?.trim()) {
+      throw new Error(
+        'Refusing to start: CORS_ORIGINS must be set in production (comma-separated portal origins)',
       );
     }
 

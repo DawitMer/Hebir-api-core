@@ -40,11 +40,12 @@ export function validateRouteSample(last: TripGpsPoint, sample: TripGpsPoint) {
     return { reason: 'accuracy_too_poor', distanceM: 0 };
   const elapsedS = (sample.timestampMs - last.timestampMs) / 1000;
   const distanceM = Math.round(haversineKm(last, sample) * 1000);
+  const hasGap = elapsedS > 120;
   if (distanceM / elapsedS > 42 && distanceM > 100)
-    return { reason: 'impossible_speed_jump', distanceM: 0 };
+    return { reason: 'impossible_speed_jump', distanceM: 0, hasGap };
   if (distanceM < 3 && elapsedS < 10)
-    return { reason: 'stationary_jitter', distanceM: 0 };
-  return { distanceM, hasGap: elapsedS > 120 };
+    return { reason: 'stationary_jitter', distanceM: 0, hasGap };
+  return { distanceM, hasGap };
 }
 
 @Injectable()
@@ -101,13 +102,21 @@ export class TripRouteRecorderService {
         timestampMs: (ride.startedAt ?? ride.createdAt).getTime(),
       });
       const validation = validateRouteSample(checkpoint.lastFix, sample);
-      if (validation.reason)
+      if (validation.reason) {
+        // A long outage must not freeze the meter on the pre-gap pin: resync
+        // lastFix without billing the teleport so later samples can accrue.
+        if (validation.hasGap) {
+          checkpoint.hasGaps = true;
+          checkpoint.lastFix = sample;
+          await em.save(checkpoint);
+        }
         return {
           accepted: false,
           reason: validation.reason,
           totalDistanceM: checkpoint.totalDistanceM,
           latestPoint: checkpoint.lastFix,
         };
+      }
       checkpoint.totalDistanceM += validation.distanceM;
       checkpoint.lastFix = sample;
       checkpoint.hasGaps ||= validation.hasGap ?? false;

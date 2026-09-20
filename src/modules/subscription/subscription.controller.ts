@@ -24,6 +24,7 @@ import {
   RateLimitPresets,
 } from '../../common/rate-limit/rate-limit.decorator';
 import { ChapaClient } from '../payments/chapa.client';
+import { treatAsProductionRuntime } from '../../config/public-api-host';
 
 @Controller('subscription')
 export class SubscriptionController {
@@ -149,7 +150,12 @@ export class SubscriptionController {
   @UseGuards(JwtAuthGuard)
   @Post('dev-activate')
   async devActivate(@CurrentUser() user: { userId: string }) {
-    if (this.config.get<string>('NODE_ENV') === 'production') {
+    if (
+      treatAsProductionRuntime(
+        this.config.get<string>('NODE_ENV'),
+        this.config.get<string>('PUBLIC_API_BASE_URL'),
+      )
+    ) {
       throw new BadRequestException('dev-activate disabled in production');
     }
     return this.subscriptionService.devActivate(user.userId);

@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 import { Response } from 'express';
 import { MetricsService } from './metrics.service';
+import { treatAsProductionRuntime } from '../config/public-api-host';
 
 @Controller()
 export class MetricsController {
@@ -22,7 +23,13 @@ export class MetricsController {
     config: ConfigService,
   ) {
     this.scrapeToken = config.get<string>('METRICS_TOKEN') ?? '';
-    if (!this.scrapeToken && config.get<string>('NODE_ENV') === 'production') {
+    if (
+      !this.scrapeToken &&
+      treatAsProductionRuntime(
+        config.get<string>('NODE_ENV'),
+        config.get<string>('PUBLIC_API_BASE_URL'),
+      )
+    ) {
       throw new Error('METRICS_TOKEN is required in production');
     }
   }

@@ -50,6 +50,9 @@ import { ReviewDecision } from '../src/modules/kyc/dto/review-decision.dto';
 import { PushService } from '../src/modules/push/push.service';
 import { DeviceToken } from '../src/modules/push/device-token.entity';
 import { GovService } from '../src/modules/gov/gov.service';
+import { GovController } from '../src/modules/gov/gov.controller';
+import { PromotionsService } from '../src/modules/promotions/promotions.service';
+import { PromotionsController } from '../src/modules/promotions/promotions.controller';
 import { GovAccessLog } from '../src/modules/gov/entities/access-log.entity';
 import {
   DriverMonthlyExpenseReport,
@@ -319,12 +322,25 @@ run('isolated PostgreSQL + Redis production-contract regressions', () => {
     );
     const module = await Test.createTestingModule({
       imports: [PassportModule.register({ defaultStrategy: 'jwt' })],
-      controllers: [RidesController, KycController],
+      controllers: [
+        RidesController,
+        KycController,
+        PromotionsController,
+        GovController,
+      ],
       providers: [
         JwtStrategy,
         { provide: ConfigService, useValue: config },
         { provide: AuthService, useValue: auth },
         { provide: RidesService, useValue: rides },
+        { provide: GovService, useValue: government },
+        {
+          provide: PromotionsService,
+          useValue: new PromotionsService(
+            repo(Promotion),
+            repo(PromotionClaim),
+          ),
+        },
         { provide: KycService, useValue: verificationService },
         { provide: KycStorageService, useValue: storage },
         { provide: REDIS_CLIENT, useValue: redis },
@@ -1033,6 +1049,118 @@ run('isolated PostgreSQL + Redis production-contract regressions', () => {
       .get(`/rides/${trip.id}/messages`)
       .set('Authorization', `Bearer ${access}`)
       .expect(401);
+  });
+
+  it('HTTP promotion claims use the authenticated rider and enforce concurrent campaign limits', async () => {
+    const first = await user();
+    const second = await user();
+    const jwt = new JwtService({
+      secret: config.get<string>('JWT_ACCESS_SECRET'),
+    });
+    const access = (account: UserAccount) =>
+      jwt.sign(
+        { sub: account.id, typ: 'access', jti: randomUUID() },
+        { expiresIn: '15m' },
+      );
+    const firstAccess = access(first);
+    const secondAccess = access(second);
+    const promotion = await db.getRepository(Promotion).save({
+      code: 'AUDIT-' + randomUUID(),
+      description: 'Isolated campaign',
+      discountMinor: 100,
+      startsAt: new Date(Date.now() - 60000),
+      endsAt: new Date(Date.now() + 3600000),
+      maxUsagePerUser: 1,
+      maxTotalUsage: 1,
+      isActive: true,
+    });
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        request(app.getHttpServer())
+          .post('/promotions/' + promotion.id + '/claim')
+          .set('Authorization', 'Bearer ' + firstAccess)
+          .expect(201),
+      ),
+    );
+    expect(new Set(responses.map((response) => response.body.id)).size).toBe(1);
+    expect(responses[0].body.riderId).toBe(first.id);
+    await request(app.getHttpServer())
+      .post('/promotions/' + promotion.id + '/claim')
+      .set('Authorization', 'Bearer ' + secondAccess)
+      .expect(409);
+    const firstList = await request(app.getHttpServer())
+      .get('/promotions')
+      .set('Authorization', 'Bearer ' + firstAccess)
+      .expect(200);
+    const secondList = await request(app.getHttpServer())
+      .get('/promotions')
+      .set('Authorization', 'Bearer ' + secondAccess)
+      .expect(200);
+    expect(
+      firstList.body.find((p: { id: string }) => p.id === promotion.id).status,
+    ).toBe('claimed');
+    expect(
+      secondList.body.find((p: { id: string }) => p.id === promotion.id).status,
+    ).toBe('available');
+    await request(app.getHttpServer())
+      .post('/promotions/not-a-uuid/claim')
+      .set('Authorization', 'Bearer ' + firstAccess)
+      .expect(400);
+    expect(
+      await db
+        .getRepository(PromotionClaim)
+        .count({ where: { promotionId: promotion.id } }),
+    ).toBe(1);
+  });
+
+  it('government HTTP validation rejects malformed queries and keeps roles separate', async () => {
+    const officer = await user(UserRole.GOV_OFFICER);
+    const admin = await user(UserRole.ADMIN);
+    const jwt = new JwtService({
+      secret: config.get<string>('JWT_ACCESS_SECRET'),
+    });
+    const access = (account: UserAccount) =>
+      jwt.sign(
+        { sub: account.id, typ: 'access', jti: randomUUID() },
+        { expiresIn: '15m' },
+      );
+    const officerAccess = access(officer);
+    await request(app.getHttpServer())
+      .get('/gov/access-log')
+      .set('Authorization', 'Bearer ' + access(admin))
+      .expect(403);
+    await request(app.getHttpServer())
+      .get('/kyc/queue')
+      .set('Authorization', 'Bearer ' + officerAccess)
+      .expect(403);
+    for (const path of [
+      '/gov/expenses?limit=0',
+      '/gov/expenses?limit=999999',
+      '/gov/expenses?month=2026-99',
+      '/gov/access-log?limit=NaN',
+      '/gov/drivers?q[a]=x',
+      '/gov/drivers/not-a-uuid',
+    ]) {
+      await request(app.getHttpServer())
+        .get(path)
+        .set('Authorization', 'Bearer ' + officerAccess)
+        .expect(400);
+    }
+    for (const body of [
+      { status: 42 },
+      { status: 'approved', reviewerNotes: {} },
+      { status: 'approved', reviewerId: admin.id },
+    ]) {
+      await request(app.getHttpServer())
+        .patch('/gov/expenses/' + randomUUID() + '/status')
+        .set('Authorization', 'Bearer ' + officerAccess)
+        .send(body)
+        .expect(400);
+    }
+    await request(app.getHttpServer())
+      .get('/gov/drivers')
+      .set('Authorization', 'Bearer ' + officerAccess)
+      .expect(200, []);
   });
 
   it('government annual reports include more than 100 rows and exclude previous years', async () => {

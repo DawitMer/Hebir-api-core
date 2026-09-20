@@ -3,9 +3,9 @@ import {
   Get,
   Post,
   Param,
+  ParseUUIDPipe,
   Body,
   UseGuards,
-  Request,
 } from '@nestjs/common';
 import {
   IsDateString,
@@ -14,24 +14,33 @@ import {
   IsOptional,
   IsString,
   Min,
+  Max,
+  MaxLength,
+  Matches,
 } from 'class-validator';
 import { PromotionsService } from './promotions.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../auth/entities/user-account.entity';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 class CreatePromotionDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(64)
+  @Matches(/\S/)
   code: string;
 
   @IsString()
   @IsNotEmpty()
+  @MaxLength(2000)
+  @Matches(/\S/)
   description: string;
 
   @IsInt()
   @Min(0)
+  @Max(2147483647)
   discountMinor: number;
 
   @IsDateString()
@@ -43,11 +52,13 @@ class CreatePromotionDto {
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(2147483647)
   maxUsagePerUser?: number;
 
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(2147483647)
   maxTotalUsage?: number;
 }
 
@@ -58,14 +69,17 @@ export class PromotionsController {
 
   @Get()
   @Roles(UserRole.RIDER)
-  async listPromotions(@Request() req: any) {
-    return this.promotionsService.getAvailablePromotions(req.user.id);
+  async listPromotions(@CurrentUser() user: { userId: string }) {
+    return this.promotionsService.getAvailablePromotions(user.userId);
   }
 
   @Post(':id/claim')
   @Roles(UserRole.RIDER)
-  async claimPromotion(@Param('id') id: string, @Request() req: any) {
-    return this.promotionsService.claimPromotion(req.user.id, id);
+  async claimPromotion(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: { userId: string },
+  ) {
+    return this.promotionsService.claimPromotion(user.userId, id);
   }
 
   @Get('admin')

@@ -14,7 +14,7 @@ function prodBase(): Record<string, unknown> {
     LOCATION_SVC_URL: 'http://location-svc:8090',
     LOCATION_SVC_TOKEN: 'location-svc-token',
     PAYMENT_WEBHOOK_SECRET: 'abcdefghijklmnopqrstuvwx',
-    CORS_ORIGINS: 'https://ops.hebir.et',
+    CORS_ORIGINS: 'https://ops.hebirtaxi.com',
     METRICS_TOKEN: 'metrics-token-16',
     SMS_PROVIDER: 'http',
     SMS_HTTP_URL: 'https://sms.example/send',
@@ -67,5 +67,28 @@ describe('production env gates', () => {
     env.REDIS_HOST = '127.0.0.1';
     env.REDIS_PORT = '6379';
     expect(() => validate(env)).toThrow(/REDIS_URL/);
+  });
+
+  it('refuses TypeORM synchronize in production', () => {
+    const env = prodBase();
+    env.TYPEORM_SYNCHRONIZE = 'true';
+    expect(() => validate(env)).toThrow(/TYPEORM_SYNCHRONIZE/);
+  });
+
+  it('refuses synchronize on the public host even when NODE_ENV is development', () => {
+    const env = prodBase();
+    env.NODE_ENV = 'development';
+    env.PUBLIC_API_BASE_URL = 'https://api.hebirtaxi.com';
+    env.TYPEORM_SYNCHRONIZE = 'true';
+    expect(() => validate(env)).toThrow(/TYPEORM_SYNCHRONIZE/);
+  });
+
+  it('starts on the public host without SMS while NODE_ENV is still development', () => {
+    const env = prodBase();
+    env.NODE_ENV = 'development';
+    env.PUBLIC_API_BASE_URL = 'https://api.hebirtaxi.com';
+    delete env.SMS_PROVIDER;
+    delete env.SMS_HTTP_URL;
+    expect(() => validate(env)).not.toThrow();
   });
 });

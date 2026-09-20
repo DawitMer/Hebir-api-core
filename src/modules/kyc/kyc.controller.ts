@@ -26,6 +26,11 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { RedisRateLimitGuard } from '../../common/rate-limit/redis-rate-limit.guard';
+import {
+  RateLimit,
+  RateLimitPresets,
+} from '../../common/rate-limit/rate-limit.decorator';
 import { UserRole } from '../auth/entities/user-account.entity';
 
 @Controller('kyc')
@@ -71,8 +76,9 @@ export class KycController {
     return this.kycService.listMyDocuments(user.userId);
   }
 
-  @UseGuards(JwtAuthGuard, RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)
   @Roles(UserRole.DRIVER, UserRole.ADMIN)
+  @RateLimit(RateLimitPresets.kycUpload)
   @Post('me/documents/presign')
   presign(
     @CurrentUser() user: { userId: string },
@@ -82,8 +88,9 @@ export class KycController {
   }
 
   /** Local-storage PUT target (S3 mode uses the real S3 URL instead). */
-  @UseGuards(JwtAuthGuard, RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)
   @Roles(UserRole.DRIVER, UserRole.ADMIN)
+  @RateLimit(RateLimitPresets.kycUpload)
   @Put('me/documents/upload-body')
   async uploadBody(
     @CurrentUser() user: { userId: string },
@@ -111,8 +118,9 @@ export class KycController {
     );
   }
 
-  @UseGuards(JwtAuthGuard, RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)
   @Roles(UserRole.DRIVER, UserRole.ADMIN)
+  @RateLimit(RateLimitPresets.kycUpload)
   @Post('me/documents/confirm')
   confirm(
     @CurrentUser() user: { userId: string },

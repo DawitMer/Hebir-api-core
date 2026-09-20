@@ -1,4 +1,5 @@
 import type { CorsOptions } from '@nestjs/common/interfaces/external/cors-options.interface';
+import { treatAsProductionFromEnv } from './public-api-host';
 
 const DEV_DEFAULT_ORIGINS = [
   'http://127.0.0.1:5173',
@@ -9,9 +10,16 @@ const DEV_DEFAULT_ORIGINS = [
   'http://localhost:3000',
 ];
 
+const PUBLIC_HEBIR_ORIGINS = [
+  'https://ops.hebirtaxi.com',
+  'https://gov.hebirtaxi.com',
+  'https://hebirtaxi.com',
+  'https://www.hebirtaxi.com',
+];
+
 /**
  * Comma-separated allowlist, e.g.
- * CORS_ORIGINS=https://ops.hebir.app,https://gov.hebir.app
+ * CORS_ORIGINS=https://ops.hebirtaxi.com,https://gov.hebirtaxi.com
  */
 export function parseCorsOrigins(raw: string | undefined): string[] {
   if (!raw?.trim()) return [];
@@ -25,14 +33,17 @@ export function resolveAllowedOrigins(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   const configured = parseCorsOrigins(env.CORS_ORIGINS);
-  const allowLocal = env.CORS_ALLOW_LOCAL !== 'false';
+  const productionLike = treatAsProductionFromEnv(env);
+  const allowLocal = !productionLike && env.CORS_ALLOW_LOCAL !== 'false';
   const devOrigins = allowLocal ? DEV_DEFAULT_ORIGINS : [];
 
   if (configured.length > 0) {
-    return Array.from(new Set([...configured, ...devOrigins]));
+    return productionLike
+      ? configured
+      : Array.from(new Set([...configured, ...devOrigins]));
   }
-  if (env.NODE_ENV === 'production') {
-    return devOrigins;
+  if (productionLike) {
+    return PUBLIC_HEBIR_ORIGINS;
   }
   return DEV_DEFAULT_ORIGINS;
 }

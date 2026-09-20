@@ -15,6 +15,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { REDIS_CLIENT } from '../../redis/redis.module';
+import { treatAsProductionRuntime } from '../../config/public-api-host';
 
 export type KycStorageMode = 's3' | 'local';
 
@@ -49,7 +50,10 @@ export class KycStorageService {
     }
     this.viewSecret = viewSecret;
 
-    const isProd = this.config.get<string>('NODE_ENV') === 'production';
+    const isProd = treatAsProductionRuntime(
+      this.config.get<string>('NODE_ENV'),
+      this.config.get<string>('PUBLIC_API_BASE_URL'),
+    );
     const wantLocal = forced === 'local' || !bucket || !accessKey || !secretKey;
     if (wantLocal) {
       if (isProd) {

@@ -1,9 +1,9 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Query,
   Req,
@@ -16,23 +16,18 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { UserRole } from '../auth/entities/user-account.entity';
+import {
+  GovDriverSearchDto,
+  GovExpensesQueryDto,
+  GovLimitDto,
+  ReviewExpenseDto,
+} from './gov.dto';
 
 function clientIp(req: Request): string {
   // Express applies the configured trusted-proxy boundary; never trust a
   // caller's raw X-Forwarded-For when recording government access audits.
   return req.ip || req.socket.remoteAddress || 'unknown';
 }
-
-const EXPENSE_REVIEW_STATUSES = new Set([
-  'pending',
-  'verified',
-  'flagged',
-  'rejected',
-  'approved',
-  'changes_required',
-  'under_review',
-  'submitted',
-]);
 
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.GOV_OFFICER)
@@ -58,10 +53,9 @@ export class GovController {
   async listDrivers(
     @CurrentUser() user: { userId: string },
     @Req() req: Request,
-    @Query('q') q?: string,
-    @Query('tin') tin?: string,
-    @Query('name') name?: string,
+    @Query() query: GovDriverSearchDto,
   ) {
+    const { q, tin, name } = query;
     const searching = Boolean(q?.trim() || tin?.trim() || name?.trim());
     await this.govService.recordAccess(
       user.userId,
@@ -74,7 +68,7 @@ export class GovController {
 
   @Get('drivers/:driverId')
   async getDriver(
-    @Param('driverId') driverId: string,
+    @Param('driverId', ParseUUIDPipe) driverId: string,
     @CurrentUser() user: { userId: string },
     @Req() req: Request,
   ) {
@@ -91,10 +85,7 @@ export class GovController {
   async listExpenses(
     @CurrentUser() user: { userId: string },
     @Req() req: Request,
-    @Query('status') status?: string,
-    @Query('month') month?: string,
-    @Query('search') search?: string,
-    @Query('limit') limit?: string,
+    @Query() query: GovExpensesQueryDto,
   ) {
     await this.govService.recordAccess(
       user.userId,
@@ -103,16 +94,14 @@ export class GovController {
       clientIp(req),
     );
     return this.govService.listAllExpenses({
-      status,
-      month,
-      search,
-      limit: limit ? Number(limit) : 300,
+      ...query,
+      limit: query.limit ?? 300,
     });
   }
 
   @Get('expenses/:id')
   async getExpense(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: { userId: string },
     @Req() req: Request,
   ) {
@@ -127,17 +116,12 @@ export class GovController {
 
   @Patch('expenses/:id/status')
   async setExpenseStatus(
-    @Param('id') id: string,
-    @Body() body: { status?: string; reviewerNotes?: string; notes?: string },
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: ReviewExpenseDto,
     @CurrentUser() user: { userId: string },
     @Req() req: Request,
   ) {
-    const status = body?.status?.trim();
-    if (!status || !EXPENSE_REVIEW_STATUSES.has(status)) {
-      throw new BadRequestException(
-        `status must be one of: ${[...EXPENSE_REVIEW_STATUSES].join(', ')}`,
-      );
-    }
+    const status = body.status;
     const reviewerNotes = body?.reviewerNotes?.trim() || body?.notes?.trim();
     await this.govService.recordAccess(
       user.userId,
@@ -157,7 +141,7 @@ export class GovController {
   async accessLog(
     @CurrentUser() user: { userId: string },
     @Req() req: Request,
-    @Query('limit') limit?: string,
+    @Query() query: GovLimitDto,
   ) {
     await this.govService.recordAccess(
       user.userId,
@@ -165,12 +149,12 @@ export class GovController {
       undefined,
       clientIp(req),
     );
-    return this.govService.listAccessLogs(limit ? Number(limit) : 200);
+    return this.govService.listAccessLogs(query.limit ?? 200);
   }
 
   @Get('drivers/:driverId/trips')
   async trips(
-    @Param('driverId') driverId: string,
+    @Param('driverId', ParseUUIDPipe) driverId: string,
     @CurrentUser() user: { userId: string },
     @Req() req: Request,
   ) {
@@ -185,7 +169,7 @@ export class GovController {
 
   @Get('drivers/:driverId/earnings')
   async earnings(
-    @Param('driverId') driverId: string,
+    @Param('driverId', ParseUUIDPipe) driverId: string,
     @CurrentUser() user: { userId: string },
     @Req() req: Request,
   ) {
@@ -200,7 +184,7 @@ export class GovController {
 
   @Get('drivers/:driverId/expenses')
   async expenses(
-    @Param('driverId') driverId: string,
+    @Param('driverId', ParseUUIDPipe) driverId: string,
     @CurrentUser() user: { userId: string },
     @Req() req: Request,
   ) {

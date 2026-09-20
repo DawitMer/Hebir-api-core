@@ -44,7 +44,7 @@ describe('RidesService.acceptOffer race', () => {
     } as Ride;
   }
 
-  function buildService(ride: Ride) {
+  function buildService(ride: Ride, standing = 'good') {
     const rides = {
       findOne: jest.fn(async () => ({ ...ride })),
       update: jest.fn(),
@@ -60,7 +60,10 @@ describe('RidesService.acceptOffer race', () => {
     };
     const fares = { find: jest.fn().mockResolvedValue([]) };
     const tips = { find: jest.fn().mockResolvedValue([]) };
-    const users = { find: jest.fn().mockResolvedValue([]) };
+    const users = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue({ standing }),
+    };
     const vehicles = { find: jest.fn().mockResolvedValue([]) };
     const geocoding = {
       reverseGeocodePair: jest.fn().mockResolvedValue({
@@ -213,6 +216,15 @@ describe('RidesService.acceptOffer race', () => {
       { userId: driverId, status: DriverStatus.RESERVED },
       expect.anything(),
     );
+  });
+
+  it('rejects accept when the driver account is marketplace-blocked', async () => {
+    const { service, rides } = buildService(offeredRide(), 'flagged');
+
+    await expect(service.acceptOffer(driverId, rideId)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(rides.update).not.toHaveBeenCalled();
   });
 });
 

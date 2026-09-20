@@ -125,4 +125,52 @@ describe('OtpService', () => {
       'Invalid or expired OTP',
     );
   });
+
+  it('returns debugCode only on local development, not the public API host', async () => {
+    const local = new OtpService(
+      redis as never,
+      configOf({
+        NODE_ENV: 'development',
+        JWT_ACCESS_SECRET: 'test-pepper',
+        PUBLIC_API_BASE_URL: 'http://127.0.0.1:3000',
+      }),
+      sms as unknown as SmsService,
+    );
+    await expect(local.request(phone)).resolves.toEqual({
+      sent: true,
+      expiresInSec: 300,
+      debugCode: '123456',
+    });
+    expect(sms.sendOtp).not.toHaveBeenCalled();
+  });
+
+  it('does not leak debugCode when NODE_ENV is development on the public host', async () => {
+    const misconfiguredLive = new OtpService(
+      redis as never,
+      configOf({
+        NODE_ENV: 'development',
+        JWT_ACCESS_SECRET: 'test-pepper',
+        PUBLIC_API_BASE_URL: 'https://api.hebirtaxi.com',
+      }),
+      sms as unknown as SmsService,
+    );
+    await expect(misconfiguredLive.request(phone)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('rejects the universal sandbox OTP on the public API host', async () => {
+    const misconfiguredLive = new OtpService(
+      redis as never,
+      configOf({
+        NODE_ENV: 'development',
+        JWT_ACCESS_SECRET: 'test-pepper',
+        PUBLIC_API_BASE_URL: 'https://api.hebirtaxi.com',
+      }),
+      sms as unknown as SmsService,
+    );
+    await expect(
+      misconfiguredLive.consumeCode(phone, '123456'),
+    ).rejects.toThrow('Invalid or expired OTP');
+  });
 });
