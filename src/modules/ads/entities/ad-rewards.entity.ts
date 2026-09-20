@@ -7,8 +7,20 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
+/**
+ * Campaign lifecycle.
+ *
+ * Self-serve (advertiser) campaigns:
+ *   pending_review → approved (awaiting payment) → active → ended
+ *                  ↘ rejected (editable, resubmits as pending_review)
+ * House campaigns created by ops skip payment: pending_review → active.
+ * paused is reversible by ops or the advertiser; ended is terminal.
+ */
 export enum CampaignState {
   DRAFT = 'draft',
+  PENDING_REVIEW = 'pending_review',
+  APPROVED = 'approved',
+  REJECTED = 'rejected',
   ACTIVE = 'active',
   PAUSED = 'paused',
   ENDED = 'ended',
@@ -42,15 +54,41 @@ export class AdCampaign {
   @Column({ type: 'varchar', array: true, default: '{}' }) ageBands: string[];
   @Column({ type: 'varchar', array: true, default: '{}' })
   workCategories: string[];
+  /** Empty = any interest. Matched against RiderAdProfile.interests. */
+  @Column({ type: 'varchar', array: true, default: '{}' }) interests: string[];
   @Column({ type: 'enum', enum: CampaignState, default: CampaignState.DRAFT })
   state: CampaignState;
   @Column({ type: 'timestamptz' }) startsAt: Date;
   @Column({ type: 'timestamptz' }) endsAt: Date;
   @Column({ type: 'int', default: 15 }) requiredViewSeconds: number;
   @Column({ type: 'int', default: 300 }) rewardMinor: number;
+  /** Rider-reward budget (rewardMinor × purchased views). */
   @Column({ type: 'bigint', default: 0 }) budgetMinor: string;
+  /** Rider-reward budget already granted; never decremented. */
   @Column({ type: 'bigint', default: 0 }) reservedMinor: string;
   @Column({ type: 'int', default: 100 }) deliveryWeight: number;
+
+  // --- self-serve advertiser fields ---
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  advertiserId: string | null;
+  /** Verified views the advertiser bought (budgetMinor / rewardMinor). */
+  @Column({ type: 'int', default: 0 }) purchasedViews: number;
+  /** What the advertiser paid Hebir, in ETB minor units. */
+  @Column({ type: 'bigint', default: 0 }) paidMinor: string;
+  @Column({ type: 'varchar', length: 96, nullable: true }) paymentTxRef:
+    string | null;
+  @Column({ type: 'timestamptz', nullable: true }) paidAt: Date | null;
+  @Column({ type: 'text', nullable: true }) reviewNote: string | null;
+  @Column({ type: 'uuid', nullable: true }) reviewedBy: string | null;
+  @Column({ type: 'timestamptz', nullable: true }) reviewedAt: Date | null;
+
+  // --- delivery counters (reporting) ---
+  /** Sessions started (creative shown). */
+  @Column({ type: 'int', default: 0 }) impressions: number;
+  /** CTA taps recorded via POST sessions/:id/click. */
+  @Column({ type: 'int', default: 0 }) ctaClicks: number;
+
   @Column({ type: 'uuid', nullable: true }) createdBy: string | null;
   @Column({ type: 'uuid', nullable: true }) updatedBy: string | null;
   @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date;
@@ -64,6 +102,10 @@ export class RiderAdProfile {
   @Column({ type: 'uuid' }) riderId: string;
   @Column({ length: 16 }) ageBand: string;
   @Column({ length: 32 }) workCategory: string;
+  /** Broad, self-declared interests used only for sponsor matching. */
+  @Column({ type: 'varchar', array: true, default: '{}' }) interests: string[];
+  /** Sub-city / area the rider mostly travels in (optional, coarse). */
+  @Column({ type: 'varchar', length: 48, nullable: true }) area: string | null;
   @Column({ default: false }) consented: boolean;
   @Column({ length: 32, nullable: true }) consentVersion: string | null;
   @Column({ type: 'timestamptz', nullable: true }) consentedAt: Date | null;
@@ -88,6 +130,7 @@ export class AdViewSession {
   @Column({ type: 'timestamptz' }) expiresAt: Date;
   @Column({ type: 'timestamptz' }) lastHeartbeatAt: Date;
   @Column({ type: 'timestamptz', nullable: true }) completedAt: Date | null;
+  @Column({ type: 'timestamptz', nullable: true }) ctaClickedAt: Date | null;
   @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date;
 }
 

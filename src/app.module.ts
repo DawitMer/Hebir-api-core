@@ -31,6 +31,7 @@ import {
 import { LocationSvcModule } from './common/location-svc/location-svc.module';
 import { GeocodingModule } from './common/geocoding/geocoding.module';
 import { AdsModule } from './modules/ads/ads.module';
+import { AdvertisersModule } from './modules/advertisers/advertisers.module';
 import { PromotionsModule } from './modules/promotions/promotions.module';
 import { treatAsProductionFromEnv } from './config/public-api-host';
 
@@ -99,6 +100,7 @@ import { treatAsProductionFromEnv } from './config/public-api-host';
     LocationSvcModule,
     GeocodingModule,
     AdsModule,
+    AdvertisersModule,
     AuthModule,
     UsersModule,
     AdminModule,

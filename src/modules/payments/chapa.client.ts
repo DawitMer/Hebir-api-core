@@ -154,6 +154,136 @@ export class ChapaClient {
     };
   }
 
+  /**
+   * Generic hosted checkout (advertiser campaign budgets and any future
+   * non-driver purchase). The caller owns the tx_ref namespace and the
+   * `meta` it needs back on verification.
+   */
+  async initializeCheckout(input: {
+    txRef: string;
+    amountEtb: number;
+    email: string;
+    firstName: string;
+    lastName: string;
+    phone?: string | null;
+    title: string;
+    description: string;
+    meta: Record<string, string>;
+    callbackPath: string;
+    returnUrl: string;
+  }): Promise<ChapaCheckout> {
+    const secret = this.config.get<string>('CHAPA_SECRET_KEY')?.trim();
+    if (!secret) {
+      throw new ServiceUnavailableException(
+        'Online payment is not configured yet (CHAPA_SECRET_KEY) — WAITING_FOR_PROVIDER_SETUP',
+      );
+    }
+    const publicBase = (
+      this.config.get<string>('PUBLIC_API_BASE_URL') ?? 'http://127.0.0.1:3000'
+    ).replace(/\/$/, '');
+    const phone = input.phone
+      ? (toEthiopiaNational10(input.phone) ?? undefined)
+      : undefined;
+    const amount = input.amountEtb.toFixed(2);
+
+    const res = await fetch(CHAPA_INIT, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        amount,
+        currency: 'ETB',
+        email: input.email,
+        first_name: input.firstName.slice(0, 50),
+        last_name: input.lastName.slice(0, 50),
+        ...(phone ? { phone_number: phone } : {}),
+        tx_ref: input.txRef,
+        callback_url: `${publicBase}${input.callbackPath}`,
+        return_url: input.returnUrl,
+        customization: {
+          title: input.title.slice(0, 16),
+          description: input.description.slice(0, 50),
+        },
+        meta: input.meta,
+      }),
+    });
+    const json = (await res.json().catch(() => null)) as {
+      status?: string;
+      message?: string;
+      data?: { checkout_url?: string };
+    } | null;
+    const checkoutUrl = json?.data?.checkout_url;
+    if (!res.ok || json?.status !== 'success' || !checkoutUrl) {
+      this.logger.warn(
+        `Chapa initialize failed: ${res.status} ${json?.message ?? ''}`,
+      );
+      throw new ServiceUnavailableException(
+        'Chapa did not return a checkout URL',
+      );
+    }
+    return {
+      checkoutUrl,
+      txRef: input.txRef,
+      amountEtb: amount,
+      provider: PaymentProvider.CHAPA,
+    };
+  }
+
+  /** Verification without any driver assumptions; meta is returned as-is. */
+  async verifyTransaction(txRef: string): Promise<{
+    txRef: string;
+    amountEtb: string;
+    currency: string;
+    status: string;
+    meta: Record<string, string>;
+    raw: Record<string, unknown>;
+  }> {
+    const secret = this.config.get<string>('CHAPA_SECRET_KEY')?.trim();
+    if (!secret) {
+      throw new ServiceUnavailableException(
+        'Chapa is not configured (set CHAPA_SECRET_KEY)',
+      );
+    }
+    const res = await fetch(`${CHAPA_VERIFY}/${encodeURIComponent(txRef)}`, {
+      headers: { Authorization: `Bearer ${secret}` },
+    });
+    const json = (await res.json().catch(() => null)) as {
+      status?: string;
+      data?: {
+        status?: string;
+        amount?: number | string;
+        currency?: string;
+        tx_ref?: string;
+        meta?: Record<string, string> | string | null;
+      };
+    } | null;
+    const data = json?.data;
+    if (!res.ok || json?.status !== 'success' || !data) {
+      throw new ServiceUnavailableException(
+        'Chapa could not verify the transaction',
+      );
+    }
+    let meta: Record<string, string> = {};
+    if (data.meta && typeof data.meta === 'object') meta = data.meta;
+    else if (typeof data.meta === 'string') {
+      try {
+        meta = JSON.parse(data.meta) as Record<string, string>;
+      } catch {
+        meta = {};
+      }
+    }
+    return {
+      txRef: data.tx_ref ?? txRef,
+      amountEtb: String(data.amount ?? ''),
+      currency: data.currency ?? 'ETB',
+      status: (data.status ?? '').toLowerCase(),
+      meta,
+      raw: data as Record<string, unknown>,
+    };
+  }
+
   async verifyTxRef(txRef: string): Promise<ChapaVerifiedCharge> {
     const secret = this.config.get<string>('CHAPA_SECRET_KEY')?.trim();
     if (!secret) {
