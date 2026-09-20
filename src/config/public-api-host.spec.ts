@@ -23,9 +23,9 @@ describe('public-api-host', () => {
     expect(
       treatAsProductionRuntime('development', 'http://127.0.0.1:3000'),
     ).toBe(false);
-    expect(treatAsProductionRuntime('production', 'http://127.0.0.1:3000')).toBe(
-      true,
-    );
+    expect(
+      treatAsProductionRuntime('production', 'http://127.0.0.1:3000'),
+    ).toBe(true);
   });
 
   it('enforces KYC on the public host unless explicitly disabled', () => {

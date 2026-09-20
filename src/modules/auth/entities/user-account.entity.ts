@@ -32,9 +32,7 @@ export function isAccountClosed(standing: AccountStanding): boolean {
 
 /** Flagged accounts may still sign in, but cannot go online or take trips. */
 export function isMarketplaceBlocked(standing: AccountStanding): boolean {
-  return (
-    isAccountClosed(standing) || standing === AccountStanding.FLAGGED
-  );
+  return isAccountClosed(standing) || standing === AccountStanding.FLAGGED;
 }
 
 @Entity('user_accounts')

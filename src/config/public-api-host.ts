@@ -1,7 +1,4 @@
-const PUBLIC_API_HOSTS = new Set([
-  'api.hebirtaxi.com',
-  'api.ridehebir.com',
-]);
+const PUBLIC_API_HOSTS = new Set(['api.hebirtaxi.com', 'api.ridehebir.com']);
 
 /**
  * True when PUBLIC_API_BASE_URL points at the real Hebir API host.
@@ -33,10 +30,12 @@ export function treatAsProductionRuntime(
   return nodeEnv === 'production' || isPublicHebirApiHost(publicApiBaseUrl);
 }
 
-export function treatAsProductionFromEnv(env: {
-  NODE_ENV?: string;
-  PUBLIC_API_BASE_URL?: string;
-} = process.env): boolean {
+export function treatAsProductionFromEnv(
+  env: {
+    NODE_ENV?: string;
+    PUBLIC_API_BASE_URL?: string;
+  } = process.env,
+): boolean {
   return treatAsProductionRuntime(env.NODE_ENV, env.PUBLIC_API_BASE_URL);
 }
 

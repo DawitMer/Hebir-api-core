@@ -14,11 +14,17 @@ import { buildSocketCors } from '../../config/security.config';
 import { treatAsProductionRuntime } from '../../config/public-api-host';
 import { AuthService } from '../auth/auth.service';
 import { isAccountClosed } from '../auth/entities/user-account.entity';
-import { PushService } from '../push/push.service';
+import {
+  PushService,
+  WS_PRESENCE_KEY_PREFIX,
+  WS_PRESENCE_TTL_SECONDS,
+} from '../push/push.service';
 
 const NOTIFICATIONS_CHANNEL = 'notifications';
 
-type SocketWithUser = Socket & { data: { userId?: string } };
+type SocketWithUser = Socket & {
+  data: { userId?: string; presenceTimer?: ReturnType<typeof setInterval> };
+};
 
 /**
  * Drivers must be asked to accept a rider within the seat-hold window
@@ -30,7 +36,13 @@ type SocketWithUser = Socket & { data: { userId?: string } };
  * handshake query: a client-supplied `userId` would let anyone subscribe to
  * another user's ride offers and pickup addresses.
  */
-@WebSocketGateway({ cors: buildSocketCors() })
+// Explicit heartbeat so a phone that drops off mobile data is detected within
+// ~45 s and falls back to push instead of silently missing its offers.
+@WebSocketGateway({
+  cors: buildSocketCors(),
+  pingInterval: 25_000,
+  pingTimeout: 20_000,
+})
 export class NotificationsGateway
   implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
 {
@@ -95,15 +107,42 @@ export class NotificationsGateway
     const sockets = this.userSockets.get(userId) ?? new Set<string>();
     sockets.add(socket.id);
     this.userSockets.set(userId, sockets);
+    await this.markPresent(userId, socket.id);
+    // Keep the presence entry alive for as long as the socket is; a crashed
+    // instance's entries expire after WS_PRESENCE_TTL_SECONDS on their own.
+    socket.data.presenceTimer = setInterval(
+      () => void this.markPresent(userId, socket.id),
+      (WS_PRESENCE_TTL_SECONDS * 1000) / 3,
+    );
   }
 
   handleDisconnect(socket: SocketWithUser) {
+    const timer = socket.data?.presenceTimer;
+    if (timer) clearInterval(timer);
     const userId = socket.data?.userId;
     if (!userId) return;
+    void this.redis
+      .srem(`${WS_PRESENCE_KEY_PREFIX}${userId}`, socket.id)
+      .catch(() => undefined);
     const sockets = this.userSockets.get(userId);
     if (!sockets) return;
     sockets.delete(socket.id);
     if (sockets.size === 0) this.userSockets.delete(userId);
+  }
+
+  private async markPresent(userId: string, socketId: string): Promise<void> {
+    const key = `${WS_PRESENCE_KEY_PREFIX}${userId}`;
+    try {
+      await this.redis
+        .multi()
+        .sadd(key, socketId)
+        .expire(key, WS_PRESENCE_TTL_SECONDS)
+        .exec();
+    } catch (error) {
+      this.logger.warn(
+        `WS presence update failed: ${(error as Error).message}`,
+      );
+    }
   }
 
   async onModuleDestroy() {

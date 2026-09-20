@@ -12,6 +12,8 @@ import { UpdateMeDto } from './dto/update-me.dto';
 import { RegisterDeviceTokenDto } from './dto/register-device-token.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { RedisRateLimitGuard } from '../../common/rate-limit/redis-rate-limit.guard';
+import { RateLimit } from '../../common/rate-limit/rate-limit.decorator';
 import { PushService } from '../push/push.service';
 
 @Controller('users')
@@ -49,6 +51,19 @@ export class UsersController {
     @Body() dto: RegisterDeviceTokenDto,
   ) {
     return this.push.unregisterToken(user.userId, dto.token);
+  }
+
+  /** Self-serve push check for the FCM device matrix (Settings → test). */
+  @UseGuards(JwtAuthGuard, RedisRateLimitGuard)
+  @RateLimit({
+    prefix: 'rl:push-test',
+    limit: 3,
+    windowSec: 60,
+    keyBy: 'user',
+  })
+  @Post('me/device-token/test')
+  sendTestPush(@CurrentUser() user: { userId: string }) {
+    return this.push.sendTest(user.userId);
   }
 
   @UseGuards(JwtAuthGuard)
