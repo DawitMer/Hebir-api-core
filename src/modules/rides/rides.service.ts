@@ -76,7 +76,6 @@ import {
 } from './ride-live-track';
 import {
   ARRIVE_RADIUS_M,
-  COMPLETE_RADIUS_M,
   START_RADIUS_M,
   metresBetween,
 } from './ride-geofence';
@@ -1022,14 +1021,6 @@ export class RidesService {
         `Ride must be in_progress to complete (current status: ${ride.status})`,
       );
     }
-
-    await this.assertDriverWithin(
-      driverId,
-      ride.dropoff,
-      COMPLETE_RADIUS_M,
-      'end the trip',
-      'destination',
-    );
 
     // Status flip + fare + payment + earning + driver release are atomic:
     // a mid-flight failure rolls the ride back to in_progress so the driver
@@ -2551,8 +2542,10 @@ export class RidesService {
   }
 
   /**
-   * Arrive / start / complete must happen near the pin. Landmark pickups in
-   * Addis plus cheap GNSS need a generous radius, not a lane-level fence.
+   * Arrive and start must happen near the pin. Landmark pickups in Addis plus
+   * cheap GNSS need a generous radius, not a lane-level fence. Completion is
+   * intentionally not geofenced so a driver can settle an already-started trip
+   * when their final GPS update is stale or unavailable.
    */
   private async assertDriverWithin(
     driverId: string,
