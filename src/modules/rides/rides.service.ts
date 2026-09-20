@@ -29,7 +29,7 @@ import {
 import { createHash, randomInt } from 'crypto';
 import Redis from 'ioredis';
 import { REDIS_CLIENT } from '../../redis/redis.module';
-import { Ride, RideStatus } from './entities/ride.entity';
+import { Ride, RideStatus, RideSettlementStatus } from './entities/ride.entity';
 import { RideRouteCheckpoint } from './entities/ride-route-checkpoint.entity';
 import { RideStatusEvent } from './entities/ride-status-event.entity';
 import { RideMessage } from './entities/ride-message.entity';
@@ -81,6 +81,8 @@ import {
   metresBetween,
 } from './ride-geofence';
 import { settleTripMeterDistance } from './gps-gap-settlement';
+import { chooseChargedSettlement } from './settlement-policy';
+import { IncidentsService } from '../incidents/incidents.service';
 import {
   DRIVER_ONLY_TRANSITIONS,
   isClientRideTransitionAllowed,
@@ -252,6 +254,8 @@ export class RidesService {
     private readonly adRewards?: AdRewardsService,
     @Optional()
     private readonly promotionsService?: PromotionsService,
+    @Optional()
+    private readonly incidentsService?: IncidentsService,
   ) {}
 
   /**
@@ -1084,10 +1088,8 @@ export class RidesService {
         hasGaps: checkpoint.hasGaps,
         lastFixAgeMs: Date.now() - checkpoint.lastFix.timestampMs,
       });
-      const actualDistanceM = billedMeter.distanceM;
 
       const completedAt = new Date();
-      const distanceKm = Math.max(0, actualDistanceM) / 1000;
       const startedAtTime = lockedRide.startedAt
         ? lockedRide.startedAt.getTime()
         : completedAt.getTime() - 30 * 1000;
@@ -1097,9 +1099,9 @@ export class RidesService {
       );
       const durationMinutes = actualDurationS / 60;
 
-      const fareBreakdown = await this.fareService.calculate(
+      const meteredFare = await this.fareService.calculate(
         {
-          distanceKm,
+          distanceKm: Math.max(0, billedMeter.distanceM) / 1000,
           durationMinutes,
           zoneId: zoneIdFor(lockedRide.pickup),
           surgeMultiplier: lockedRide.quotedSurgeMultiplier ?? undefined,
@@ -1107,14 +1109,38 @@ export class RidesService {
         },
         lockedRide.quotedFareRates,
       );
-      const farePayload = billedMeter.estimated
-        ? {
-            ...fareBreakdown,
-            gpsGapEstimated: true,
-            recordedDistanceM: billedMeter.recordedDistanceM,
-            billedDistanceM: billedMeter.distanceM,
-          }
-        : fareBreakdown;
+      const quotedDurationMinutes = Math.max(
+        1,
+        (lockedRide.durationS ?? actualDurationS) / 60,
+      );
+      const quotedFare = await this.fareService.calculate(
+        {
+          distanceKm: Math.max(0, lockedRide.distanceM ?? 0) / 1000,
+          durationMinutes: quotedDurationMinutes,
+          zoneId: zoneIdFor(lockedRide.pickup),
+          surgeMultiplier: lockedRide.quotedSurgeMultiplier ?? undefined,
+          vehicleType: lockedRide.vehicleType,
+        },
+        lockedRide.quotedFareRates,
+      );
+      const charged = chooseChargedSettlement({
+        meter: billedMeter,
+        meteredFare,
+        quotedFare,
+        quotedDistanceM: lockedRide.distanceM,
+      });
+      const actualDistanceM = charged.billedDistanceM;
+      const fareBreakdown = charged.fare;
+      const farePayload = {
+        ...fareBreakdown,
+        gpsGapEstimated: charged.status === RideSettlementStatus.ESTIMATED,
+        settlementStatus: charged.status,
+        estimateReason: charged.estimateReason,
+        recordedDistanceM: billedMeter.recordedDistanceM,
+        billedDistanceM: charged.billedDistanceM,
+        quotedFareTotal: charged.quotedFareTotal,
+        uncappedFareTotal: charged.uncappedFareTotal,
+      };
 
       const completed = await em.update(
         Ride,
@@ -1128,6 +1154,7 @@ export class RidesService {
           fare: String(farePayload.total),
           fareBreakdown: farePayload as unknown as Record<string, unknown>,
           pricingVersion: 'v1',
+          settlementStatus: charged.status,
           offerDriverId: null,
           offerExpiresAt: null,
         },
@@ -1158,12 +1185,12 @@ export class RidesService {
       const fareRecord = await em.save(
         em.create(FareRecord, {
           rideId,
-          baseFare: String(fareBreakdown.initialFee),
-          distanceFare: String(fareBreakdown.distanceCharge),
-          timeFare: String(fareBreakdown.timeCharge),
-          surgeMultiplier: String(fareBreakdown.surgeMultiplier),
-          platformFee: String(fareBreakdown.platformFee),
-          total: String(fareBreakdown.total),
+          baseFare: String(farePayload.initialFee),
+          distanceFare: String(farePayload.distanceCharge),
+          timeFare: String(farePayload.timeCharge),
+          surgeMultiplier: String(farePayload.surgeMultiplier),
+          platformFee: String(farePayload.platformFee),
+          total: String(farePayload.total),
         }),
       );
 
@@ -1242,6 +1269,12 @@ export class RidesService {
         promoSettlement,
         actualDistanceM,
         actualDurationS,
+        settlementStatus: charged.status,
+        estimateReason: charged.estimateReason,
+        quotedFareTotal: charged.quotedFareTotal,
+        uncappedFareTotal: charged.uncappedFareTotal,
+        chargedFareTotal: Math.round(Number(farePayload.total)),
+        riderId: lockedRide.riderId,
       };
     });
     const {
@@ -1251,7 +1284,43 @@ export class RidesService {
       promoSettlement,
       actualDistanceM,
       actualDurationS,
+      settlementStatus,
+      estimateReason,
+      quotedFareTotal,
+      uncappedFareTotal,
+      chargedFareTotal,
+      riderId: settledRiderId,
     } = settlement;
+
+    let settlementReviewCaseNumber: string | null = null;
+    if (
+      settlementStatus === RideSettlementStatus.ESTIMATED &&
+      estimateReason &&
+      this.incidentsService
+    ) {
+      try {
+        const review = await this.incidentsService.createEstimatedSettlementReview({
+          rideId,
+          driverId,
+          riderId: settledRiderId,
+          reason: estimateReason,
+          quotedFareTotal,
+          uncappedFareTotal,
+          chargedFareTotal,
+        });
+        settlementReviewCaseNumber = review.caseNumber;
+        await this.rides.update(
+          { id: rideId },
+          { settlementReviewCaseNumber: review.caseNumber },
+        );
+      } catch (error) {
+        this.logger.warn(
+          `Ride ${rideId} settled as estimated but review case failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
 
     const settledRide =
       (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
@@ -1270,6 +1339,9 @@ export class RidesService {
       driverHebirCredit: adSettlement?.driverHebirCreditMinor
         ? (adSettlement.driverHebirCreditMinor / 100).toFixed(2)
         : '0.00',
+      settlementStatus,
+      settlementReviewCaseNumber:
+        settlementReviewCaseNumber ?? settledRide.settlementReviewCaseNumber,
       fareBreakdown: {
         ...settledRide.fareBreakdown,
         actualDistanceKm: (settledRide.actualDistanceM ?? 0) / 1000,
@@ -1292,7 +1364,7 @@ export class RidesService {
     });
 
     this.logger.log(
-      `Ride ${rideId}: completed by driver ${driverId}, fare=${fareTotal}, distance=${actualDistanceM}m, duration=${actualDurationS}s`,
+      `Ride ${rideId}: completed by driver ${driverId}, fare=${fareTotal}, distance=${actualDistanceM}m, duration=${actualDurationS}s, settlement=${settlementStatus}`,
     );
     return (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
   }

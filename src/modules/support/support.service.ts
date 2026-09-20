@@ -94,16 +94,28 @@ export class SupportService {
     });
   }
 
-  async listThreads(status?: string) {
-    const where =
-      status === 'open' || status === 'closed'
-        ? { status: status as SupportThreadStatus }
-        : {};
-    const rows = await this.threads.find({
-      where,
-      order: { lastMessageAt: 'DESC' },
-      take: 100,
-    });
+  async listThreads(
+    status?: string,
+    opts?: { limit?: number; before?: string },
+  ) {
+    const limit = Math.max(1, Math.min(100, opts?.limit ?? 100));
+    const qb = this.threads
+      .createQueryBuilder('t')
+      .orderBy('t.lastMessageAt', 'DESC')
+      .addOrderBy('t.id', 'DESC')
+      .take(limit);
+    if (status === 'open' || status === 'closed') {
+      qb.andWhere('t.status = :status', { status });
+    }
+    if (opts?.before) {
+      const cursor = await this.threads.findOne({ where: { id: opts.before } });
+      if (!cursor) throw new BadRequestException('Invalid thread cursor');
+      qb.andWhere(
+        '(t."lastMessageAt", t.id) < (:lastMessageAt, :id)',
+        { lastMessageAt: cursor.lastMessageAt, id: cursor.id },
+      );
+    }
+    const rows = await qb.getMany();
     if (!rows.length) return [];
     const users = await this.users.find({
       where: { id: In(rows.map((r) => r.userId)) },

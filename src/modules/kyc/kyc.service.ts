@@ -3,11 +3,12 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, QueryFailedError, Repository } from 'typeorm';
 import {
   DriverVerification,
   VerificationStatus,
@@ -22,6 +23,10 @@ import {
   AlertSeverity,
   AlertStatus,
 } from './entities/compliance-alert.entity';
+import {
+  KycReviewMessage,
+  KycReviewSenderRole,
+} from './entities/kyc-review-message.entity';
 import { ReviewDecision, ReviewDecisionDto } from './dto/review-decision.dto';
 import {
   ConfirmDocumentDto,
@@ -29,6 +34,10 @@ import {
   StartVerificationDto,
   VehicleChangeDto,
 } from './dto/document-upload.dto';
+import {
+  ListKycReviewMessagesDto,
+  SendKycReviewMessageDto,
+} from './dto/kyc-review-message.dto';
 import {
   KYC_UPLOAD_UNAVAILABLE_MESSAGE,
   KycStorageService,
@@ -39,15 +48,18 @@ import {
   isKycDocumentExpired,
 } from './kyc-document-policy';
 import { SubscriptionService } from '../subscription/subscription.service';
-import { UserAccount } from '../auth/entities/user-account.entity';
+import { UserAccount, UserRole } from '../auth/entities/user-account.entity';
 import { Vehicle } from '../rides/entities/vehicle.entity';
+import { NotificationsGateway } from '../notifications/notifications.gateway';
 
 /** Review queues are worked top-down; this bounds one page. */
 const MAX_LIST_ROWS = 500;
+const DEFAULT_PAGE_LIMIT = 100;
 const VEHICLE_CHANGE_DOC_TYPES = ['registration', 'insurance'] as const;
 
 @Injectable()
 export class KycService {
+  private readonly logger = new Logger(KycService.name);
   private transactional = false;
 
   /** One driver's application/documents/vehicle/audit changes commit together. */
@@ -68,8 +80,10 @@ export class KycService {
         em.getRepository(ComplianceAlert),
         em.getRepository(UserAccount),
         em.getRepository(Vehicle),
+        em.getRepository(KycReviewMessage),
         this.subscriptionService,
         this.storage,
+        this.notifications,
       );
       scoped.transactional = true;
       return action(scoped);
@@ -88,16 +102,38 @@ export class KycService {
     private readonly users: Repository<UserAccount>,
     @InjectRepository(Vehicle)
     private readonly vehicles: Repository<Vehicle>,
+    @InjectRepository(KycReviewMessage)
+    private readonly reviewMessages: Repository<KycReviewMessage>,
     private readonly subscriptionService: SubscriptionService,
     private readonly storage: KycStorageService,
+    private readonly notifications: NotificationsGateway,
   ) {}
 
-  async listQueue(status?: VerificationStatus) {
-    const rows = await this.verifications.find({
-      where: status ? { status } : {},
-      order: { submittedAt: 'ASC' },
-      take: MAX_LIST_ROWS,
-    });
+  async listQueue(
+    status?: VerificationStatus,
+    opts?: { limit?: number; before?: string },
+  ) {
+    const limit = Math.max(
+      1,
+      Math.min(MAX_LIST_ROWS, opts?.limit ?? DEFAULT_PAGE_LIMIT),
+    );
+    const qb = this.verifications
+      .createQueryBuilder('v')
+      .orderBy('v.submittedAt', 'ASC')
+      .addOrderBy('v.id', 'ASC')
+      .take(limit);
+    if (status) qb.andWhere('v.status = :status', { status });
+    if (opts?.before) {
+      const cursor = await this.verifications.findOne({
+        where: { id: opts.before },
+      });
+      if (!cursor) throw new BadRequestException('Invalid queue cursor');
+      qb.andWhere(
+        '(v."submittedAt", v.id) > (:submittedAt, :id)',
+        { submittedAt: cursor.submittedAt, id: cursor.id },
+      );
+    }
+    const rows = await qb.getMany();
     const names = await this.driverNameMap(rows.map((r) => r.driverId));
     return rows.map((r) => ({
       ...r,
@@ -1013,12 +1049,151 @@ export class KycService {
     };
   }
 
-  listAuditTrail(targetId?: string) {
-    return this.auditTrails.find({
-      where: targetId ? { targetId } : {},
-      order: { occurredAt: 'DESC' },
-      take: 200,
+  listAuditTrail(
+    targetId?: string,
+    opts?: { limit?: number; before?: string },
+  ) {
+    const limit = Math.max(1, Math.min(200, opts?.limit ?? 200));
+    const qb = this.auditTrails
+      .createQueryBuilder('a')
+      .orderBy('a.occurredAt', 'DESC')
+      .addOrderBy('a.id', 'DESC')
+      .take(limit);
+    if (targetId) qb.andWhere('a.targetId = :targetId', { targetId });
+    if (opts?.before) {
+      const cursor = new Date(opts.before);
+      if (Number.isNaN(cursor.getTime())) {
+        throw new BadRequestException('Invalid audit cursor');
+      }
+      qb.andWhere('a."occurredAt" < :before', { before: cursor });
+    }
+    return qb.getMany();
+  }
+
+  async listReviewMessages(
+    verificationId: string,
+    actor: { userId: string; roles: string[] },
+    query: ListKycReviewMessagesDto = {},
+  ) {
+    await this.assertCanAccessVerification(verificationId, actor);
+    const limit = Math.max(1, Math.min(100, query.limit ?? 50));
+    const qb = this.reviewMessages
+      .createQueryBuilder('m')
+      .where('m.verificationId = :verificationId', { verificationId });
+    if (query.before) {
+      const cursor = await this.reviewMessages.findOne({
+        where: { id: query.before, verificationId },
+      });
+      if (!cursor) throw new BadRequestException('Invalid message cursor');
+      qb.andWhere(
+        '(m."createdAt", m.id) < (:createdAt, :id)',
+        { createdAt: cursor.createdAt, id: cursor.id },
+      );
+    }
+    const rows = await qb
+      .orderBy('m.createdAt', 'DESC')
+      .addOrderBy('m.id', 'DESC')
+      .take(limit)
+      .getMany();
+    rows.reverse();
+    return rows.map((m) => this.mapReviewMessage(m));
+  }
+
+  async postReviewMessage(
+    verificationId: string,
+    actor: { userId: string; roles: string[] },
+    dto: SendKycReviewMessageDto,
+  ) {
+    const verification = await this.assertCanAccessVerification(
+      verificationId,
+      actor,
+    );
+    const trimmed = dto.body.trim();
+    if (!trimmed) throw new BadRequestException('Message body is required');
+    const isAdmin = (actor.roles ?? []).includes(UserRole.ADMIN);
+    const senderRole = isAdmin
+      ? KycReviewSenderRole.ADMIN
+      : KycReviewSenderRole.DRIVER;
+    const clientMessageId = dto.clientMessageId?.trim() || null;
+
+    let saved: KycReviewMessage;
+    try {
+      saved = await this.reviewMessages.save(
+        this.reviewMessages.create({
+          verificationId,
+          senderId: actor.userId,
+          senderRole,
+          body: trimmed,
+          clientMessageId,
+        }),
+      );
+    } catch (error) {
+      if (
+        !(error instanceof QueryFailedError) ||
+        (error.driverError as { code?: string }).code !== '23505' ||
+        !clientMessageId
+      ) {
+        throw error;
+      }
+      const existing = await this.reviewMessages.findOne({
+        where: {
+          verificationId,
+          senderId: actor.userId,
+          clientMessageId,
+        },
+      });
+      if (!existing || existing.body !== trimmed) {
+        throw new ConflictException('Message id already used');
+      }
+      return this.mapReviewMessage(existing);
+    }
+
+    const notifyUserId =
+      senderRole === KycReviewSenderRole.ADMIN
+        ? verification.driverId
+        : verification.assignedToId;
+    if (notifyUserId && notifyUserId !== actor.userId) {
+      try {
+        await this.notifications.notify(notifyUserId, 'support.chat_message', {
+          threadId: verificationId,
+          kind: 'kyc_review',
+          verificationId,
+          message: this.mapReviewMessage(saved),
+        });
+      } catch (error) {
+        this.logger.warn(
+          `kyc review notify failed: ${(error as Error).message}`,
+        );
+      }
+    }
+    return this.mapReviewMessage(saved);
+  }
+
+  private mapReviewMessage(m: KycReviewMessage) {
+    return {
+      id: m.id,
+      verificationId: m.verificationId,
+      senderId: m.senderId,
+      senderRole: m.senderRole,
+      body: m.body,
+      clientMessageId: m.clientMessageId,
+      createdAt: m.createdAt.toISOString(),
+    };
+  }
+
+  private async assertCanAccessVerification(
+    verificationId: string,
+    actor: { userId: string; roles: string[] },
+  ) {
+    const verification = await this.verifications.findOne({
+      where: { id: verificationId },
     });
+    if (!verification) throw new NotFoundException('Verification not found');
+    const isAdmin = (actor.roles ?? []).includes(UserRole.ADMIN);
+    if (!isAdmin && verification.driverId !== actor.userId) {
+      throw new ForbiddenException('Not your verification');
+    }
+    return verification;
   }
 
   private async driverNameMap(driverIds: string[]) {

@@ -2,6 +2,9 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { GovAccessLog } from './entities/access-log.entity';
 import { DriverMonthlyExpenseReport } from './entities/driver-monthly-expense-report.entity';
+import { GovLegalRequest } from './entities/gov-legal-request.entity';
+import { GovLegalRequestEvent } from './entities/gov-legal-request-event.entity';
+import { GovReportJob } from './entities/gov-report-job.entity';
 import { Booking } from '../booking/entities/booking.entity';
 import { DriverSubscription } from '../subscription/entities/driver-subscription.entity';
 import { Trip } from '../matching/entities/trip.entity';
@@ -22,6 +25,9 @@ import { DriverExpensesController } from './driver-expenses.controller';
     TypeOrmModule.forFeature([
       GovAccessLog,
       DriverMonthlyExpenseReport,
+      GovLegalRequest,
+      GovLegalRequestEvent,
+      GovReportJob,
       Booking,
       DriverSubscription,
       Trip,

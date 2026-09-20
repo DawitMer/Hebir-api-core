@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -138,6 +139,52 @@ export class IncidentsService {
     return this.toListItem(incident);
   }
 
+  /**
+   * System-opened review case when completion billed an estimated /
+   * quote-capped fare. Does not require the reporter to be a participant —
+   * the driver who completed the trip is recorded as reporter.
+   */
+  async createEstimatedSettlementReview(args: {
+    rideId: string;
+    driverId: string;
+    riderId: string;
+    reason: 'gps_gap' | 'zero_gps';
+    quotedFareTotal: number;
+    uncappedFareTotal: number;
+    chargedFareTotal: number;
+  }) {
+    const caseNumber = await this.nextCaseNumber();
+    const reasonLabel =
+      args.reason === 'zero_gps'
+        ? 'No accepted GPS fixes during the trip'
+        : 'GPS meter was gapped or stale';
+    const incident = await this.incidents.save(
+      this.incidents.create({
+        caseNumber,
+        type: IncidentType.RIDE_DISPUTE,
+        title: `Estimated fare review · ${args.rideId.slice(0, 8)}`,
+        description:
+          `${reasonLabel}. Charged ETB ${args.chargedFareTotal} ` +
+          `(quoted ${args.quotedFareTotal}, uncapped estimate ${args.uncappedFareTotal}). ` +
+          `Auto-opened at completion for ops review.`,
+        priority: IncidentPriority.MEDIUM,
+        status: IncidentStatus.OPEN,
+        reporterId: args.driverId,
+        reporterRole: 'driver',
+        rideId: args.rideId,
+        relatedUserId: args.riderId,
+        relatedName: `Trip ${args.rideId.slice(0, 8)}`,
+        lat: null,
+        lng: null,
+        locationLabel: null,
+      }),
+    );
+    this.logger.log(
+      `Opened settlement review ${caseNumber} for ride ${args.rideId} (${args.reason})`,
+    );
+    return incident;
+  }
+
   /** Resolves an optional rideId, but only when the reporter was on that ride. */
   private async participantRide(
     rideId: string | undefined,
@@ -152,13 +199,23 @@ export class IncidentsService {
     return ride;
   }
 
-  async list(status?: IncidentStatus) {
-    const where = status ? { status } : {};
-    const rows = await this.incidents.find({
-      where,
-      order: { reportedAt: 'DESC' },
-      take: 200,
-    });
+  async list(status?: IncidentStatus, opts?: { limit?: number; before?: string }) {
+    const limit = Math.max(1, Math.min(200, opts?.limit ?? 200));
+    const qb = this.incidents
+      .createQueryBuilder('i')
+      .orderBy('i.reportedAt', 'DESC')
+      .addOrderBy('i.id', 'DESC')
+      .take(limit);
+    if (status) qb.andWhere('i.status = :status', { status });
+    if (opts?.before) {
+      const cursor = await this.incidents.findOne({ where: { id: opts.before } });
+      if (!cursor) throw new BadRequestException('Invalid incident cursor');
+      qb.andWhere(
+        '(i."reportedAt", i.id) < (:reportedAt, :id)',
+        { reportedAt: cursor.reportedAt, id: cursor.id },
+      );
+    }
+    const rows = await qb.getMany();
     return rows.map((r) => this.toListItem(r));
   }
 
@@ -274,6 +331,7 @@ export class IncidentsService {
 
   private toListItem(incident: Incident) {
     return {
+      id: incident.id,
       caseNumber: incident.caseNumber,
       type: incident.type,
       title: incident.title,

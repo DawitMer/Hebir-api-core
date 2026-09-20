@@ -11,6 +11,17 @@ import {
   DriverMonthlyExpenseReport,
   MonthlyExpenseStatus,
 } from './entities/driver-monthly-expense-report.entity';
+import {
+  GovLegalRequest,
+  GovLegalRequestPriority,
+  GovLegalRequestStatus,
+  GovLegalRequestType,
+} from './entities/gov-legal-request.entity';
+import { GovLegalRequestEvent } from './entities/gov-legal-request-event.entity';
+import {
+  GovReportJob,
+  GovReportJobStatus,
+} from './entities/gov-report-job.entity';
 import { Booking, BookingStatus } from '../booking/entities/booking.entity';
 import {
   DriverSubscription,
@@ -32,6 +43,16 @@ import {
 } from '../kyc/entities/driver-verification.entity';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
 import { PushService } from '../push/push.service';
+import {
+  assertLegalStatusTransition,
+  canAssignLegalRequest,
+} from './legal-request-policy';
+import type {
+  AssignGovLegalRequestDto,
+  CreateGovLegalRequestDto,
+  CreateGovReportJobDto,
+  UpdateGovLegalStatusDto,
+} from './gov.dto';
 
 /** Compliance reports are paged in the portal; this bounds one page. */
 const MAX_REPORT_ROWS = 100;
@@ -50,6 +71,12 @@ export class GovService {
     private readonly accessLogs: Repository<GovAccessLog>,
     @InjectRepository(DriverMonthlyExpenseReport)
     private readonly monthlyReports: Repository<DriverMonthlyExpenseReport>,
+    @InjectRepository(GovLegalRequest)
+    private readonly legalRequests: Repository<GovLegalRequest>,
+    @InjectRepository(GovLegalRequestEvent)
+    private readonly legalEvents: Repository<GovLegalRequestEvent>,
+    @InjectRepository(GovReportJob)
+    private readonly reportJobs: Repository<GovReportJob>,
     @InjectRepository(Booking) private readonly bookings: Repository<Booking>,
     @InjectRepository(DriverSubscription)
     private readonly subscriptions: Repository<DriverSubscription>,
@@ -84,11 +111,22 @@ export class GovService {
     );
   }
 
-  async listAccessLogs(limit = 200) {
-    const rows = await this.accessLogs.find({
-      order: { accessedAt: 'DESC' },
-      take: limit,
-    });
+  async listAccessLogs(limit = 200, before?: string) {
+    const take = Math.max(1, Math.min(500, limit));
+    const qb = this.accessLogs
+      .createQueryBuilder('l')
+      .orderBy('l.accessedAt', 'DESC')
+      .addOrderBy('l.id', 'DESC')
+      .take(take);
+    if (before) {
+      const cursor = await this.accessLogs.findOne({ where: { id: before } });
+      if (!cursor) throw new BadRequestException('Invalid access-log cursor');
+      qb.andWhere(
+        '(l."accessedAt", l.id) < (:accessedAt, :id)',
+        { accessedAt: cursor.accessedAt, id: cursor.id },
+      );
+    }
+    const rows = await qb.getMany();
     const officerIds = [...new Set(rows.map((r) => r.officerId))];
     const officers = officerIds.length
       ? await this.users.find({ where: { id: In(officerIds) } })
@@ -528,10 +566,11 @@ export class GovService {
     month?: string;
     search?: string;
     limit?: number;
+    before?: string;
   }) {
     const now = new Date();
     const currentMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-    const limit = options?.limit ?? 300;
+    const limit = Math.max(1, Math.min(500, options?.limit ?? 300));
     const isFilterNotSubmitted = options?.status === 'not_submitted';
 
     const qb = this.monthlyReports
@@ -541,7 +580,23 @@ export class GovService {
       .where('r.reportingMonth <= :currentMonth', { currentMonth })
       .orderBy('r.reportingMonth', 'DESC')
       .addOrderBy('r.updatedAt', 'DESC')
+      .addOrderBy('r.id', 'DESC')
       .take(limit);
+
+    if (options?.before) {
+      const cursor = await this.monthlyReports.findOne({
+        where: { id: options.before },
+      });
+      if (!cursor) throw new BadRequestException('Invalid expense cursor');
+      qb.andWhere(
+        '(r."reportingMonth", r."updatedAt", r.id) < (:month, :updatedAt, :id)',
+        {
+          month: cursor.reportingMonth,
+          updatedAt: cursor.updatedAt,
+          id: cursor.id,
+        },
+      );
+    }
 
     if (options?.status && options.status !== 'all' && !isFilterNotSubmitted) {
       const mapped = this.normalizeReviewStatus(options.status);
@@ -810,16 +865,19 @@ export class GovService {
     };
   }
 
-  async getDriverEarningsReport(driverId: string) {
+  async getDriverEarningsReport(driverId: string, fiscalYear?: number) {
     const driver = await this.users.findOne({ where: { id: driverId } });
     if (!driver) throw new NotFoundException('Driver not found');
 
     const now = new Date();
-    const year = now.getUTCFullYear();
-    const currentMonthIdx = now.getUTCMonth();
-    const currentMonthStr = `${year}-${String(currentMonthIdx + 1).padStart(2, '0')}`;
+    const year = fiscalYear ?? now.getUTCFullYear();
+    const isCurrentYear = year === now.getUTCFullYear();
+    const lastMonthIdx = isCurrentYear ? now.getUTCMonth() : 11;
+    const currentMonthStr = isCurrentYear
+      ? `${year}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`
+      : null;
     const start = new Date(Date.UTC(year, 0, 1));
-    const nextMonthStart = new Date(Date.UTC(year, currentMonthIdx + 1, 1));
+    const nextMonthStart = new Date(Date.UTC(year, lastMonthIdx + 1, 1));
 
     // Aggregate in SQL strictly up to current month (ended months + current unsubmitted month)
     const rows = (await this.rides.manager.query(
@@ -864,7 +922,7 @@ export class GovService {
         ) AS report_status
       FROM months m ORDER BY m.month
     `,
-      [driverId, year, currentMonthIdx + 1],
+      [driverId, year, lastMonthIdx + 1],
     )) as Array<{
       month: string;
       gross: string;
@@ -874,7 +932,7 @@ export class GovService {
       report_status: string | null;
     }>;
     const monthlyBreakdown = rows.map((row) => {
-      const isCurrent = row.month === currentMonthStr;
+      const isCurrent = currentMonthStr !== null && row.month === currentMonthStr;
       let status = 'not_submitted';
       if (row.report_status) {
         status = row.report_status;
@@ -907,7 +965,9 @@ export class GovService {
       reportPeriod: {
         start,
         end: nextMonthStart,
-        basis: 'UTC calendar year to date',
+        basis: isCurrentYear
+          ? 'UTC calendar year to date'
+          : 'UTC full calendar year',
       },
       totalTrips: monthlyBreakdown.reduce((sum, row) => sum + row.trips, 0),
       grossEarnings,
@@ -1040,5 +1100,484 @@ export class GovService {
       monthlyEarnings.push(byMonth.get(key) ?? 0);
     }
     return { monthLabels, monthlyEarnings };
+  }
+
+  // --- Legal request intake ---
+
+  async listLegalRequests(limit = 200) {
+    const rows = await this.legalRequests.find({
+      order: { receivedAt: 'DESC' },
+      take: Math.min(limit, MAX_REPORT_ROWS * 5),
+    });
+    return this.mapLegalRequests(rows);
+  }
+
+  async getLegalRequest(id: string) {
+    const row = await this.legalRequests.findOne({ where: { id } });
+    if (!row) throw new NotFoundException('Legal request not found');
+    const [mapped] = await this.mapLegalRequests([row]);
+    const events = await this.legalEvents.find({
+      where: { requestId: id },
+      order: { occurredAt: 'DESC' },
+    });
+    return {
+      ...mapped,
+      events: events.map((e) => ({
+        id: e.id,
+        action: e.action,
+        actorId: e.actorId,
+        note: e.note,
+        payload: e.payload,
+        occurredAt: e.occurredAt.toISOString(),
+      })),
+    };
+  }
+
+  async createLegalRequest(
+    officerId: string,
+    dto: CreateGovLegalRequestDto,
+  ) {
+    let driverId = dto.driverId ?? null;
+    let driverTin = dto.driverTin?.trim() || null;
+
+    if (driverId) {
+      const driver = await this.users.findOne({ where: { id: driverId } });
+      if (!driver || !driver.roles?.includes(UserRole.DRIVER)) {
+        throw new NotFoundException('Driver not found');
+      }
+      driverTin = driverTin || driver.tin;
+    } else if (driverTin) {
+      const byTin = await this.users.findOne({ where: { tin: driverTin } });
+      if (byTin) driverId = byTin.id;
+    }
+
+    const saved = await this.legalRequests.save(
+      this.legalRequests.create({
+        type: dto.type as GovLegalRequestType,
+        title: dto.title.trim(),
+        requestingAuthority: dto.requestingAuthority.trim(),
+        caseReference: dto.caseReference.trim(),
+        driverId,
+        driverTin,
+        dataScope: dto.dataScope.map((s) => s.trim()).filter(Boolean),
+        priority: (dto.priority ??
+          GovLegalRequestPriority.MEDIUM) as GovLegalRequestPriority,
+        status: GovLegalRequestStatus.RECEIVED,
+        receivedAt: new Date(),
+        deadlineAt: dto.deadlineAt ? new Date(dto.deadlineAt) : null,
+        assignedOfficerId: null,
+        createdByOfficerId: officerId,
+        fulfilmentNotes: null,
+      }),
+    );
+
+    await this.appendLegalEvent(saved.id, officerId, 'created', null, {
+      type: saved.type,
+      priority: saved.priority,
+    });
+
+    const [mapped] = await this.mapLegalRequests([saved]);
+    return mapped;
+  }
+
+  async updateLegalRequestStatus(
+    id: string,
+    officerId: string,
+    dto: UpdateGovLegalStatusDto,
+  ) {
+    const row = await this.legalRequests.findOne({ where: { id } });
+    if (!row) throw new NotFoundException('Legal request not found');
+
+    const next = dto.status as GovLegalRequestStatus;
+    assertLegalStatusTransition(row.status, next);
+
+    const previous = row.status;
+    row.status = next;
+    if (dto.fulfilmentNotes?.trim()) {
+      row.fulfilmentNotes = dto.fulfilmentNotes.trim();
+    }
+    if (
+      next === GovLegalRequestStatus.IN_REVIEW &&
+      !row.assignedOfficerId
+    ) {
+      row.assignedOfficerId = officerId;
+    }
+    const saved = await this.legalRequests.save(row);
+
+    await this.appendLegalEvent(
+      id,
+      officerId,
+      `status:${next}`,
+      dto.note?.trim() || null,
+      { from: previous, to: next },
+    );
+
+    const [mapped] = await this.mapLegalRequests([saved]);
+    return mapped;
+  }
+
+  async assignLegalRequest(
+    id: string,
+    actorId: string,
+    dto: AssignGovLegalRequestDto,
+  ) {
+    const row = await this.legalRequests.findOne({ where: { id } });
+    if (!row) throw new NotFoundException('Legal request not found');
+    if (!canAssignLegalRequest(row.status)) {
+      throw new BadRequestException(
+        `Cannot assign a request in status ${row.status}`,
+      );
+    }
+
+    const officer = await this.users.findOne({ where: { id: dto.officerId } });
+    if (!officer || !officer.roles?.includes(UserRole.GOV_OFFICER)) {
+      throw new NotFoundException('Officer not found');
+    }
+
+    const previous = row.assignedOfficerId;
+    row.assignedOfficerId = dto.officerId;
+    if (row.status === GovLegalRequestStatus.RECEIVED) {
+      row.status = GovLegalRequestStatus.IN_REVIEW;
+    }
+    const saved = await this.legalRequests.save(row);
+
+    await this.appendLegalEvent(
+      id,
+      actorId,
+      'assigned',
+      dto.note?.trim() || null,
+      { from: previous, to: dto.officerId },
+    );
+
+    const [mapped] = await this.mapLegalRequests([saved]);
+    return mapped;
+  }
+
+  // --- Persistent report jobs ---
+
+  async listReportJobs(limit = 100) {
+    const rows = await this.reportJobs.find({
+      order: { createdAt: 'DESC' },
+      take: Math.min(limit, 200),
+    });
+    return this.mapReportJobs(rows);
+  }
+
+  async getReportJob(id: string) {
+    const row = await this.reportJobs.findOne({ where: { id } });
+    if (!row) throw new NotFoundException('Report job not found');
+    const [mapped] = await this.mapReportJobs([row]);
+    return mapped;
+  }
+
+  async downloadReportJob(id: string): Promise<{
+    csv: string;
+    filename: string;
+  }> {
+    const row = await this.reportJobs.findOne({ where: { id } });
+    if (!row) throw new NotFoundException('Report job not found');
+    if (row.status !== GovReportJobStatus.READY || !row.resultCsv) {
+      throw new BadRequestException('Report is not ready for download');
+    }
+    return {
+      csv: row.resultCsv,
+      filename: `hebir-compliance-${row.tin}-FY${row.fiscalYear}.csv`,
+    };
+  }
+
+  async createReportJob(officerId: string, dto: CreateGovReportJobDto) {
+    const driver = await this.users.findOne({ where: { id: dto.driverId } });
+    if (!driver || !driver.roles?.includes(UserRole.DRIVER)) {
+      throw new NotFoundException('Driver not found');
+    }
+    if (!driver.tin) {
+      throw new BadRequestException('Driver has no TIN on file');
+    }
+
+    const fiscalYear = dto.fiscalYear ?? new Date().getUTCFullYear();
+    const format = (dto.format?.trim() || 'CSV').toUpperCase();
+    if (format !== 'CSV') {
+      throw new BadRequestException('Only CSV format is supported');
+    }
+
+    if (dto.legalRequestId) {
+      const legal = await this.legalRequests.findOne({
+        where: { id: dto.legalRequestId },
+      });
+      if (!legal) throw new NotFoundException('Legal request not found');
+    }
+
+    let job = await this.reportJobs.save(
+      this.reportJobs.create({
+        requestedByOfficerId: officerId,
+        driverId: driver.id,
+        tin: driver.tin,
+        fiscalYear,
+        format,
+        status: GovReportJobStatus.PROCESSING,
+        parameters: {
+          driverName: driver.fullName,
+          legalRequestId: dto.legalRequestId ?? null,
+        },
+        resultCsv: null,
+        rowCount: 0,
+        grossTotal: null,
+        netTaxableTotal: null,
+        error: null,
+        legalRequestId: dto.legalRequestId ?? null,
+        completedAt: null,
+      }),
+    );
+
+    try {
+      const earnings = await this.getDriverEarningsReport(
+        driver.id,
+        fiscalYear,
+      );
+      const trips = await this.getAllDriverTripsForYear(driver.id, fiscalYear);
+      const officer = await this.users.findOne({ where: { id: officerId } });
+      const csv = this.buildComplianceCsv({
+        driverName: driver.fullName,
+        tin: driver.tin,
+        fiscalYear,
+        generatedBy: officer?.fullName || officer?.phoneNumber || officerId,
+        earnings,
+        trips,
+      });
+
+      job.status = GovReportJobStatus.READY;
+      job.resultCsv = csv;
+      job.rowCount = trips.length;
+      job.grossTotal = String(earnings.grossEarnings);
+      job.netTaxableTotal = String(earnings.netTaxableEarnings);
+      job.completedAt = new Date();
+      job.error = null;
+      job = await this.reportJobs.save(job);
+    } catch (err) {
+      job.status = GovReportJobStatus.FAILED;
+      job.error =
+        err instanceof Error ? err.message : 'Report generation failed';
+      job.completedAt = new Date();
+      job = await this.reportJobs.save(job);
+      throw err instanceof BadRequestException ||
+        err instanceof NotFoundException
+        ? err
+        : new BadRequestException(job.error);
+    }
+
+    const [mapped] = await this.mapReportJobs([job]);
+    return mapped;
+  }
+
+  private async getAllDriverTripsForYear(driverId: string, year: number) {
+    const start = new Date(Date.UTC(year, 0, 1));
+    const end = new Date(Date.UTC(year + 1, 0, 1));
+    const rides = await this.rides
+      .createQueryBuilder('r')
+      .where('r.driverId = :driverId', { driverId })
+      .andWhere('r.status = :status', { status: RideStatus.COMPLETED })
+      .andWhere('r.completedAt >= :start AND r.completedAt < :end', {
+        start,
+        end,
+      })
+      .orderBy('r.completedAt', 'DESC')
+      .getMany();
+    const filtered = rides;
+    const fareByRide =
+      filtered.length === 0
+        ? []
+        : await this.fares.find({
+            where: { rideId: In(filtered.map((r) => r.id)) },
+          });
+    const fareMap = new Map(fareByRide.map((f) => [f.rideId, f]));
+    return filtered.map((r) => {
+      const fare = fareMap.get(r.id);
+      return {
+        id: r.id,
+        status: r.status,
+        pickup: r.pickupAddress,
+        dropoff: r.dropoffAddress,
+        completedAt: r.completedAt,
+        distanceM: r.actualDistanceM ?? r.distanceM,
+        durationS: r.actualDurationS ?? r.durationS,
+        fareTotal: fare ? Number(fare.total) : 0,
+      };
+    });
+  }
+
+  private buildComplianceCsv(input: {
+    driverName: string;
+    tin: string;
+    fiscalYear: number;
+    generatedBy: string;
+    earnings: Awaited<ReturnType<GovService['getDriverEarningsReport']>>;
+    trips: Array<{
+      id: string;
+      completedAt: Date | null;
+      pickup: string | null;
+      dropoff: string | null;
+      distanceM: number | null;
+      fareTotal: number;
+    }>;
+  }): string {
+    const cell = (value: string | number) => {
+      const text = String(value);
+      return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const rows: Array<Array<string | number>> = [
+      ['Hebir compliance report'],
+      ['Driver', input.driverName],
+      ['TIN', input.tin],
+      ['Calendar year (UTC)', input.fiscalYear],
+      ['Generated by', input.generatedBy],
+      ['Generated at', new Date().toISOString()],
+      [],
+      ['Gross earnings (ETB)', input.earnings.grossEarnings],
+      ['Reported expenses (ETB)', input.earnings.reportedExpenses],
+      ['Net taxable (ETB)', input.earnings.netTaxableEarnings],
+      ['Total trips', input.earnings.totalTrips],
+      [],
+      ['Month', 'Trips', 'Gross', 'Expenses', 'Net taxable'],
+      ...input.earnings.monthlyBreakdown.map((m) => [
+        m.month,
+        m.trips,
+        m.gross,
+        m.expenses,
+        m.netTaxable,
+      ]),
+      [],
+      ['Trip ID', 'Date', 'Route', 'Distance (km)', 'Fare (ETB)'],
+      ...input.trips.map((t) => [
+        t.id,
+        t.completedAt ? t.completedAt.toISOString().slice(0, 10) : '—',
+        `${(t.pickup ?? '').trim() || '—'} → ${(t.dropoff ?? '').trim() || '—'}`,
+        t.distanceM != null ? (t.distanceM / 1000).toFixed(2) : '0',
+        t.fareTotal,
+      ]),
+    ];
+    return rows.map((row) => row.map(cell).join(',')).join('\r\n');
+  }
+
+  private async appendLegalEvent(
+    requestId: string,
+    actorId: string,
+    action: string,
+    note: string | null,
+    payload: Record<string, unknown> | null,
+  ) {
+    await this.legalEvents.save(
+      this.legalEvents.create({
+        requestId,
+        actorId,
+        action,
+        note,
+        payload,
+      }),
+    );
+  }
+
+  private async mapLegalRequests(rows: GovLegalRequest[]) {
+    if (rows.length === 0) return [];
+    const driverIds = [
+      ...new Set(rows.map((r) => r.driverId).filter(Boolean) as string[]),
+    ];
+    const officerIds = [
+      ...new Set(
+        [
+          ...rows.map((r) => r.assignedOfficerId),
+          ...rows.map((r) => r.createdByOfficerId),
+        ].filter(Boolean) as string[],
+      ),
+    ];
+    const people = await this.users.find({
+      where: { id: In([...new Set([...driverIds, ...officerIds])]) },
+    });
+    const byId = new Map(people.map((p) => [p.id, p]));
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone: 'UTC',
+    });
+
+    return rows.map((r) => {
+      const driver = r.driverId ? byId.get(r.driverId) : undefined;
+      const assignee = r.assignedOfficerId
+        ? byId.get(r.assignedOfficerId)
+        : undefined;
+      return {
+        id: r.id,
+        type: r.type,
+        title: r.title,
+        requestingAuthority: r.requestingAuthority,
+        caseReference: r.caseReference,
+        driverId: r.driverId,
+        driverTin: r.driverTin,
+        driverName: driver?.fullName || r.driverTin || '—',
+        dataScope: r.dataScope ?? [],
+        priority: r.priority,
+        status: r.status,
+        receivedAt: r.receivedAt.toISOString(),
+        receivedAtLabel: fmt.format(r.receivedAt),
+        deadlineAt: r.deadlineAt?.toISOString() ?? null,
+        deadlineLabel: r.deadlineAt ? fmt.format(r.deadlineAt) : '—',
+        assignedOfficerId: r.assignedOfficerId,
+        assignedOfficer:
+          assignee?.fullName || assignee?.phoneNumber || 'Unassigned',
+        createdByOfficerId: r.createdByOfficerId,
+        fulfilmentNotes: r.fulfilmentNotes,
+        createdAt: r.createdAt.toISOString(),
+        updatedAt: r.updatedAt.toISOString(),
+      };
+    });
+  }
+
+  private async mapReportJobs(rows: GovReportJob[]) {
+    if (rows.length === 0) return [];
+    const driverIds = [...new Set(rows.map((r) => r.driverId))];
+    const officerIds = [...new Set(rows.map((r) => r.requestedByOfficerId))];
+    const people = await this.users.find({
+      where: { id: In([...new Set([...driverIds, ...officerIds])]) },
+    });
+    const byId = new Map(people.map((p) => [p.id, p]));
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+
+    return rows.map((r) => {
+      const driver = byId.get(r.driverId);
+      const officer = byId.get(r.requestedByOfficerId);
+      const driverName =
+        (typeof r.parameters?.driverName === 'string'
+          ? r.parameters.driverName
+          : null) ||
+        driver?.fullName ||
+        r.driverId;
+      return {
+        id: r.id,
+        driverId: r.driverId,
+        driverName,
+        tin: r.tin,
+        fiscalYear: r.fiscalYear,
+        period: `FY ${r.fiscalYear}`,
+        format: r.format,
+        status: r.status,
+        rowCount: r.rowCount,
+        grossTotal: r.grossTotal != null ? Number(r.grossTotal) : null,
+        netTaxableTotal:
+          r.netTaxableTotal != null ? Number(r.netTaxableTotal) : null,
+        error: r.error,
+        legalRequestId: r.legalRequestId,
+        requestedBy: officer?.fullName || officer?.phoneNumber || r.requestedByOfficerId,
+        generatedAt: r.createdAt.toISOString(),
+        generatedAtLabel: fmt.format(r.createdAt),
+        completedAt: r.completedAt?.toISOString() ?? null,
+        downloadAvailable: r.status === GovReportJobStatus.READY,
+      };
+    });
   }
 }

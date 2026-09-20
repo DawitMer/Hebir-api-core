@@ -46,6 +46,7 @@ import {
 } from '../src/modules/kyc/entities/document-submission.entity';
 import { AuditTrail } from '../src/modules/kyc/entities/audit-trail.entity';
 import { ComplianceAlert } from '../src/modules/kyc/entities/compliance-alert.entity';
+import { KycReviewMessage } from '../src/modules/kyc/entities/kyc-review-message.entity';
 import { ReviewDecision } from '../src/modules/kyc/dto/review-decision.dto';
 import { PushService } from '../src/modules/push/push.service';
 import { DeviceToken } from '../src/modules/push/device-token.entity';
@@ -124,6 +125,7 @@ const entities = [
   FareRecord,
   GovAccessLog,
   Incident,
+  KycReviewMessage,
   PaymentEvent,
   PaymentRecord,
   Promotion,
@@ -302,8 +304,10 @@ run('isolated PostgreSQL + Redis production-contract regressions', () => {
       repo(ComplianceAlert),
       repo(UserAccount),
       repo(Vehicle),
+      repo(KycReviewMessage),
       {} as never,
       storage as never,
+      notifications as never,
     );
     government = new GovService(
       repo(GovAccessLog),

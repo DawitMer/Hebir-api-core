@@ -21,6 +21,11 @@ import {
   StartVerificationDto,
   VehicleChangeDto,
 } from './dto/document-upload.dto';
+import {
+  KycListPageDto,
+  ListKycReviewMessagesDto,
+  SendKycReviewMessageDto,
+} from './dto/kyc-review-message.dto';
 import { KycStorageService } from './kyc-storage.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -161,8 +166,14 @@ export class KycController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Get('queue')
-  listQueue(@Query('status') status?: VerificationStatus) {
-    return this.kycService.listQueue(status);
+  listQueue(
+    @Query('status') status?: VerificationStatus,
+    @Query() page?: KycListPageDto,
+  ) {
+    return this.kycService.listQueue(status, {
+      limit: page?.limit,
+      before: page?.before,
+    });
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -192,8 +203,37 @@ export class KycController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Get('audit-trail')
-  auditTrail(@Query('targetId') targetId?: string) {
-    return this.kycService.listAuditTrail(targetId);
+  auditTrail(
+    @Query('targetId') targetId?: string,
+    @Query() page?: KycListPageDto,
+  ) {
+    return this.kycService.listAuditTrail(targetId, {
+      limit: page?.limit,
+      before: page?.before,
+    });
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.DRIVER)
+  @Get(':id/messages')
+  listMessages(
+    @Param('id') id: string,
+    @Query() query: ListKycReviewMessagesDto,
+    @CurrentUser() user: { userId: string; roles: string[] },
+  ) {
+    return this.kycService.listReviewMessages(id, user, query);
+  }
+
+  @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)
+  @Roles(UserRole.ADMIN, UserRole.DRIVER)
+  @RateLimit(RateLimitPresets.chat)
+  @Post(':id/messages')
+  postMessage(
+    @Param('id') id: string,
+    @Body() dto: SendKycReviewMessageDto,
+    @CurrentUser() user: { userId: string; roles: string[] },
+  ) {
+    return this.kycService.postReviewMessage(id, user, dto);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)

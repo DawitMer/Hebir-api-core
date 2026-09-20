@@ -2,14 +2,17 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Param,
   ParseUUIDPipe,
   Patch,
+  Post,
   Query,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { GovService } from './gov.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -17,10 +20,14 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { UserRole } from '../auth/entities/user-account.entity';
 import {
+  AssignGovLegalRequestDto,
+  CreateGovLegalRequestDto,
+  CreateGovReportJobDto,
   GovDriverSearchDto,
   GovExpensesQueryDto,
   GovLimitDto,
   ReviewExpenseDto,
+  UpdateGovLegalStatusDto,
 } from './gov.dto';
 
 function clientIp(req: Request): string {
@@ -149,7 +156,10 @@ export class GovController {
       undefined,
       clientIp(req),
     );
-    return this.govService.listAccessLogs(query.limit ?? 200);
+    return this.govService.listAccessLogs(
+      query.limit ?? 200,
+      query.before,
+    );
   }
 
   @Get('drivers/:driverId/trips')
@@ -195,5 +205,154 @@ export class GovController {
       clientIp(req),
     );
     return this.govService.getDriverExpenses(driverId);
+  }
+
+  // --- Legal requests ---
+
+  @Get('legal-requests')
+  async listLegalRequests(
+    @CurrentUser() user: { userId: string },
+    @Req() req: Request,
+    @Query() query: GovLimitDto,
+  ) {
+    await this.govService.recordAccess(
+      user.userId,
+      'legal-requests-list',
+      undefined,
+      clientIp(req),
+    );
+    return this.govService.listLegalRequests(query.limit ?? 200);
+  }
+
+  @Post('legal-requests')
+  async createLegalRequest(
+    @Body() body: CreateGovLegalRequestDto,
+    @CurrentUser() user: { userId: string },
+    @Req() req: Request,
+  ) {
+    await this.govService.recordAccess(
+      user.userId,
+      'legal-request-create',
+      undefined,
+      clientIp(req),
+    );
+    return this.govService.createLegalRequest(user.userId, body);
+  }
+
+  @Get('legal-requests/:id')
+  async getLegalRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: { userId: string },
+    @Req() req: Request,
+  ) {
+    await this.govService.recordAccess(
+      user.userId,
+      'legal-request-detail',
+      id,
+      clientIp(req),
+    );
+    return this.govService.getLegalRequest(id);
+  }
+
+  @Patch('legal-requests/:id/status')
+  async updateLegalStatus(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: UpdateGovLegalStatusDto,
+    @CurrentUser() user: { userId: string },
+    @Req() req: Request,
+  ) {
+    await this.govService.recordAccess(
+      user.userId,
+      `legal-request-${body.status}`,
+      id,
+      clientIp(req),
+    );
+    return this.govService.updateLegalRequestStatus(id, user.userId, body);
+  }
+
+  @Post('legal-requests/:id/assign')
+  async assignLegalRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: AssignGovLegalRequestDto,
+    @CurrentUser() user: { userId: string },
+    @Req() req: Request,
+  ) {
+    await this.govService.recordAccess(
+      user.userId,
+      'legal-request-assign',
+      id,
+      clientIp(req),
+    );
+    return this.govService.assignLegalRequest(id, user.userId, body);
+  }
+
+  // --- Report jobs ---
+
+  @Get('reports')
+  async listReports(
+    @CurrentUser() user: { userId: string },
+    @Req() req: Request,
+    @Query() query: GovLimitDto,
+  ) {
+    await this.govService.recordAccess(
+      user.userId,
+      'reports-list',
+      undefined,
+      clientIp(req),
+    );
+    return this.govService.listReportJobs(query.limit ?? 100);
+  }
+
+  @Post('reports')
+  async createReport(
+    @Body() body: CreateGovReportJobDto,
+    @CurrentUser() user: { userId: string },
+    @Req() req: Request,
+  ) {
+    await this.govService.recordAccess(
+      user.userId,
+      'report-create',
+      body.driverId,
+      clientIp(req),
+    );
+    return this.govService.createReportJob(user.userId, body);
+  }
+
+  @Get('reports/:id')
+  async getReport(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: { userId: string },
+    @Req() req: Request,
+  ) {
+    await this.govService.recordAccess(
+      user.userId,
+      'report-detail',
+      id,
+      clientIp(req),
+    );
+    return this.govService.getReportJob(id);
+  }
+
+  @Get('reports/:id/download')
+  @Header('Cache-Control', 'no-store')
+  async downloadReport(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: { userId: string },
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    await this.govService.recordAccess(
+      user.userId,
+      'report-download',
+      id,
+      clientIp(req),
+    );
+    const { csv, filename } = await this.govService.downloadReportJob(id);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${filename.replace(/"/g, '')}"`,
+    );
+    res.send(csv);
   }
 }

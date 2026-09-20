@@ -29,6 +29,7 @@ import { PromotionsModule } from '../promotions/promotions.module';
 
 import { AdminRidesController } from './admin-rides.controller';
 import { AdminRidesService } from './admin-rides.service';
+import { IncidentsModule } from '../incidents/incidents.module';
 
 @Module({
   imports: [
@@ -53,6 +54,7 @@ import { AdminRidesService } from './admin-rides.service';
     PaymentsModule,
     AdsModule,
     PromotionsModule,
+    IncidentsModule,
   ],
   controllers: [
     RidesController,

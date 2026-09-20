@@ -64,8 +64,16 @@ export class AdminSupportController {
   constructor(private readonly support: SupportService) {}
 
   @Get('threads')
-  list(@Query('status') status?: string) {
-    return this.support.listThreads(status);
+  list(
+    @Query('status') status?: string,
+    @Query('limit') limitRaw?: string,
+    @Query('before') before?: string,
+  ) {
+    const limit = limitRaw ? Number(limitRaw) : undefined;
+    return this.support.listThreads(status, {
+      limit: Number.isFinite(limit) ? limit : undefined,
+      before,
+    });
   }
 
   @Get('threads/:id')

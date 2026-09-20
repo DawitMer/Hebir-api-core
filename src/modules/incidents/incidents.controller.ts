@@ -56,8 +56,16 @@ export class IncidentsController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)
   @Get('operations/incidents')
-  list(@Query('status') status?: IncidentStatus) {
-    return this.incidents.list(status);
+  list(
+    @Query('status') status?: IncidentStatus,
+    @Query('limit') limitRaw?: string,
+    @Query('before') before?: string,
+  ) {
+    const limit = limitRaw ? Number(limitRaw) : undefined;
+    return this.incidents.list(status, {
+      limit: Number.isFinite(limit) ? limit : undefined,
+      before,
+    });
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)

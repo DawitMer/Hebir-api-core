@@ -22,6 +22,12 @@ export enum RideStatus {
   UNMATCHED = 'unmatched',
 }
 
+/** How the completion fare was chosen. Null on incomplete rides. */
+export enum RideSettlementStatus {
+  METERED = 'metered',
+  ESTIMATED = 'estimated',
+}
+
 /**
  * On-demand ride (blueprint "Phase 0" on-demand rides module).
  * A ride is created immediately as `searching` and progresses through the
@@ -125,6 +131,19 @@ export class Ride {
 
   @Column({ type: 'varchar', length: 64, nullable: true })
   pricingVersion: string | null;
+
+  /** `metered` when GNSS was continuous; `estimated` when quote-capped. */
+  @Column({
+    type: 'enum',
+    enum: RideSettlementStatus,
+    enumName: 'rides_settlement_status_enum',
+    nullable: true,
+  })
+  settlementStatus: RideSettlementStatus | null;
+
+  /** Ops incident case opened for estimated settlements. */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  settlementReviewCaseNumber: string | null;
 
   @Column({ type: 'varchar', length: 64, nullable: true })
   cancellationType: string | null;

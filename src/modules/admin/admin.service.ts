@@ -1,4 +1,9 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ILike, In, Repository } from 'typeorm';
 import {
@@ -109,13 +114,30 @@ export class AdminService {
     return this.enrichDriver(user);
   }
 
-  async listApplications(status?: string) {
-    const where = status ? { status: status as VerificationStatus } : {};
-    const rows = await this.verifications.find({
-      where,
-      order: { submittedAt: 'ASC' },
-      take: 200,
-    });
+  async listApplications(
+    status?: string,
+    opts?: { limit?: number; before?: string },
+  ) {
+    const limit = Math.max(1, Math.min(200, opts?.limit ?? 200));
+    const qb = this.verifications
+      .createQueryBuilder('v')
+      .orderBy('v.submittedAt', 'ASC')
+      .addOrderBy('v.id', 'ASC')
+      .take(limit);
+    if (status) {
+      qb.andWhere('v.status = :status', { status });
+    }
+    if (opts?.before) {
+      const cursor = await this.verifications.findOne({
+        where: { id: opts.before },
+      });
+      if (!cursor) throw new BadRequestException('Invalid application cursor');
+      qb.andWhere(
+        '(v."submittedAt", v.id) > (:submittedAt, :id)',
+        { submittedAt: cursor.submittedAt, id: cursor.id },
+      );
+    }
+    const rows = await qb.getMany();
     return this.enrichApplicationsBatch(rows);
   }
 
@@ -344,6 +366,8 @@ export class AdminService {
         driverId: r.driverId,
         pickupAddress: r.pickupAddress,
         dropoffAddress: r.dropoffAddress,
+        settlementStatus: r.settlementStatus,
+        fare: r.fare,
         updatedAt: r.updatedAt,
       })),
       demandCells,

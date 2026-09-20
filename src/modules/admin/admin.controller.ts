@@ -67,8 +67,16 @@ export class AdminController {
   }
 
   @Get('applications')
-  listApplications(@Query('status') status?: string) {
-    return this.admin.listApplications(status);
+  listApplications(
+    @Query('status') status?: string,
+    @Query('limit') limitRaw?: string,
+    @Query('before') before?: string,
+  ) {
+    const limit = limitRaw ? Number(limitRaw) : undefined;
+    return this.admin.listApplications(status, {
+      limit: Number.isFinite(limit) ? limit : undefined,
+      before,
+    });
   }
 
   @Get('applications/:id')
