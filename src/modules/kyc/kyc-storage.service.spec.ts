@@ -38,6 +38,39 @@ describe('KYC upload immutability', () => {
     ).toEqual(expect.arrayContaining(['if-none-match', 'content-type']));
   });
 
+  it('boots on the public API host without S3 but refuses uploads with 503', async () => {
+    const service = new KycStorageService(
+      new ConfigService({
+        NODE_ENV: 'development',
+        PUBLIC_API_BASE_URL: 'https://api.hebirtaxi.com',
+        KYC_VIEW_SECRET: 'isolated-fake-view-secret',
+      }),
+      redis as never,
+    );
+    expect(service.storageMode).toBe('unavailable');
+    expect(service.uploadsAvailable).toBe(false);
+    const setCallsBefore = redis.set.mock.calls.length;
+    await expect(
+      service.createUploadUrl({
+        driverId: 'driver',
+        storageKey: 'kyc/driver/license/test.jpg',
+        contentType: 'image/jpeg',
+      }),
+    ).rejects.toMatchObject({ status: 503 });
+    await expect(
+      service.saveLocalBody(
+        'kyc/driver/license/test.jpg',
+        Buffer.from('x'),
+        'driver',
+      ),
+    ).rejects.toMatchObject({ status: 503 });
+    await expect(
+      service.assertUploadedObject('kyc/driver/license/test.jpg'),
+    ).rejects.toMatchObject({ status: 503 });
+    // Nothing was written to Redis for a presign that never happened.
+    expect(redis.set.mock.calls.length).toBe(setCallsBefore);
+  });
+
   let directory: string;
   let local: KycStorageService;
   beforeEach(async () => {

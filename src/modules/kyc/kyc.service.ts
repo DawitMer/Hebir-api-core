@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
@@ -28,7 +29,10 @@ import {
   StartVerificationDto,
   VehicleChangeDto,
 } from './dto/document-upload.dto';
-import { KycStorageService } from './kyc-storage.service';
+import {
+  KYC_UPLOAD_UNAVAILABLE_MESSAGE,
+  KycStorageService,
+} from './kyc-storage.service';
 import {
   documentRequiresExpiry,
   isApprovedKycDocumentLocked,
@@ -427,7 +431,15 @@ export class KycService {
     return verification;
   }
 
+  /** 503 before any DB work when production has no document storage. */
+  private assertUploadsAvailable(): void {
+    if (!this.storage.uploadsAvailable) {
+      throw new ServiceUnavailableException(KYC_UPLOAD_UNAVAILABLE_MESSAGE);
+    }
+  }
+
   async createPresign(driverId: string, dto: PresignDocumentDto) {
+    this.assertUploadsAvailable();
     const verification = await this.assertCanUpload(driverId, dto.documentType);
 
     const storageKey = this.storage.buildObjectKey(
@@ -457,6 +469,7 @@ export class KycService {
     body: Buffer,
     contentType?: string,
   ) {
+    this.assertUploadsAvailable();
     if (!storageKey.startsWith(`kyc/${driverId}/`)) {
       throw new ForbiddenException('Invalid storage key');
     }
@@ -469,6 +482,7 @@ export class KycService {
   }
 
   async confirmUpload(driverId: string, dto: ConfirmDocumentDto) {
+    this.assertUploadsAvailable();
     if (!this.transactional) {
       this.parseRequiredExpiry(dto.documentType, dto.expiresAt);
       if (!dto.storageKey.startsWith(`kyc/${driverId}/${dto.documentType}/`))

@@ -1,4 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   GetObjectCommand,
@@ -17,7 +21,15 @@ import { randomUUID } from 'crypto';
 import { REDIS_CLIENT } from '../../redis/redis.module';
 import { treatAsProductionRuntime } from '../../config/public-api-host';
 
-export type KycStorageMode = 's3' | 'local';
+/**
+ * `unavailable`: production-like runtime with no S3 configured. The API still
+ * boots (rides, dispatch, auth keep working) but every KYC upload path answers
+ * 503 instead of silently writing documents to an ephemeral disk.
+ */
+export type KycStorageMode = 's3' | 'local' | 'unavailable';
+
+export const KYC_UPLOAD_UNAVAILABLE_MESSAGE =
+  'Document upload is temporarily unavailable. Please try again later.';
 
 @Injectable()
 export class KycStorageService {
@@ -55,12 +67,15 @@ export class KycStorageService {
       this.config.get<string>('PUBLIC_API_BASE_URL'),
     );
     const wantLocal = forced === 'local' || !bucket || !accessKey || !secretKey;
-    if (wantLocal) {
-      if (isProd) {
-        throw new Error(
-          'KYC storage: production requires KYC_STORAGE_MODE=s3 with S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY (local disk is ephemeral and unsafe across replicas)',
-        );
-      }
+    if (wantLocal && isProd) {
+      // Do not take the whole API down over document storage: trips must keep
+      // running. Uploads fail closed (503) until S3/R2 is configured.
+      this.mode = 'unavailable';
+      this.s3 = null;
+      this.logger.error(
+        'KYC storage: production requires KYC_STORAGE_MODE=s3 with S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY. Document uploads are DISABLED (503) until they are set.',
+      );
+    } else if (wantLocal) {
       this.mode = 'local';
       this.s3 = null;
       this.logger.log('KYC storage mode: local (.local-data/kyc-uploads)');
@@ -95,6 +110,17 @@ export class KycStorageService {
     return this.mode;
   }
 
+  /** True when uploads can be accepted (S3, or local outside production). */
+  get uploadsAvailable(): boolean {
+    return this.mode !== 'unavailable';
+  }
+
+  private assertUploadsAvailable(): void {
+    if (!this.uploadsAvailable) {
+      throw new ServiceUnavailableException(KYC_UPLOAD_UNAVAILABLE_MESSAGE);
+    }
+  }
+
   buildObjectKey(driverId: string, documentType: string, contentType: string) {
     const ext = this.extensionFor(contentType);
     return `kyc/${driverId}/${documentType}/${randomUUID()}${ext}`;
@@ -106,6 +132,7 @@ export class KycStorageService {
     contentType: string;
     expiresSeconds?: number;
   }): Promise<{ uploadUrl: string; headers: Record<string, string> }> {
+    this.assertUploadsAvailable();
     const expires = params.expiresSeconds ?? 900;
     await this.redis.set(
       `kyc:upload:${params.storageKey}`,
@@ -197,6 +224,7 @@ export class KycStorageService {
 
   /** A presign is not proof that a non-empty, bounded object was uploaded. */
   async assertUploadedObject(storageKey: string): Promise<void> {
+    this.assertUploadsAvailable();
     const maxBytes = 15 * 1024 * 1024;
     if (this.mode === 's3' && this.s3) {
       const object = await this.s3.send(
@@ -224,6 +252,7 @@ export class KycStorageService {
   }
 
   async saveLocalBody(storageKey: string, body: Buffer, driverId: string) {
+    this.assertUploadsAvailable();
     const owner = await this.redis.get(`kyc:upload:${storageKey}`);
     if (owner !== driverId) {
       throw new Error('Upload not authorized or expired');
