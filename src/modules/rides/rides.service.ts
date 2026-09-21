@@ -97,6 +97,14 @@ import {
 export type EnrichedRide = Omit<Ride, 'fare'> & {
   fare: FareRecord | null;
   tipAmount: number;
+  /** Gross trip fare in ETB (same as fare_records.total). */
+  grossFareEtb?: number | null;
+  /** Cash the rider owes the driver after advertising discounts. */
+  riderCashDueEtb?: number | null;
+  /** Advertising discount applied to this trip (ETB). */
+  advertisingDiscountEtb?: number | null;
+  /** Hebir wallet credit owed to the driver for that discount (ETB). */
+  driverHebirCreditEtb?: number | null;
   driver: {
     fullName: string | null;
     username: string | null;
@@ -2273,7 +2281,7 @@ export class RidesService {
       ),
     ];
 
-    const [fares, tips, drivers, vehicles, profiles, photoByDriver] =
+    const [fares, tips, drivers, vehicles, profiles, photoByDriver, adByRide] =
       await Promise.all([
         this.fares.find({ where: { rideId: In(rideIds) } }),
         this.tips.find({ where: { rideId: In(rideIds) } }),
@@ -2287,6 +2295,9 @@ export class RidesService {
           ? this.driverProfiles.find({ where: { userId: In(driverIds) } })
           : Promise.resolve<DriverProfile[]>([]),
         this.kycService.mapDriverPhotoUrls(driverIds),
+        this.adRewards
+          ? this.adRewards.settlementsByRideIds(rideIds)
+          : Promise.resolve(new Map()),
       ]);
 
     const fareByRide = new Map(fares.map((fare) => [fare.rideId, fare]));
@@ -2364,6 +2375,19 @@ export class RidesService {
       const estFare = calculatedFares[idx];
       const storedBreakdown =
         (ride.fareBreakdown as Record<string, unknown> | null) ?? null;
+      const ad = adByRide.get(ride.id);
+      const grossFareEtb = fareRec
+        ? Number(fareRec.total)
+        : estFare.total;
+      const advertisingDiscountEtb = ad
+        ? ad.appliedDiscountMinor / 100
+        : 0;
+      const riderCashDueEtb = ad
+        ? ad.riderCashDueMinor / 100
+        : grossFareEtb;
+      const driverHebirCreditEtb = ad
+        ? ad.driverHebirCreditMinor / 100
+        : 0;
 
       const distanceKm =
         ride.actualDistanceM != null
@@ -2382,6 +2406,10 @@ export class RidesService {
         ...ride,
         distanceKm,
         durationMinutes,
+        grossFareEtb,
+        riderCashDueEtb,
+        advertisingDiscountEtb,
+        driverHebirCreditEtb,
         estimatedFare: fareRec
           ? {
               total: Number(fareRec.total),
@@ -2398,6 +2426,9 @@ export class RidesService {
               gpsGapEstimated:
                 storedBreakdown?.gpsGapEstimated === true ||
                 ride.settlementStatus === RideSettlementStatus.ESTIMATED,
+              riderCashDueEtb,
+              advertisingDiscountEtb,
+              driverHebirCreditEtb,
             }
           : {
               total: estFare.total,

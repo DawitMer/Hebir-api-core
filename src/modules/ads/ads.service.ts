@@ -459,6 +459,18 @@ export class AdRewardsService {
     };
   }
 
+  /** Batch lookup for ride enrichment (cash due vs Hebir ad credit). */
+  async settlementsByRideIds(
+    rideIds: string[],
+  ): Promise<Map<string, RideAdSettlement>> {
+    const unique = [...new Set(rideIds.filter(Boolean))];
+    if (!unique.length) return new Map();
+    const rows = await this.settlements.find({
+      where: { rideId: In(unique) },
+    });
+    return new Map(rows.map((row) => [row.rideId, row]));
+  }
+
   async requestCashout(driverId: string, amountMinor: number) {
     return this.wallet.manager.transaction(async (em) => {
       const entries = await em.find(DriverWalletEntry, {
