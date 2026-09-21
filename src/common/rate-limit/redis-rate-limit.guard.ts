@@ -14,6 +14,41 @@ import Redis from 'ioredis';
 import { REDIS_CLIENT } from '../../redis/redis.module';
 import { RATE_LIMIT_KEY, RateLimitOptions } from './rate-limit.decorator';
 
+const PHONE_KEY = /^\+[0-9]{8,15}$/;
+
+export type SignInBucket = { key: string; limit: number };
+
+/**
+ * Operations and government sign-in share a network. Counting only by IP made
+ * a few attempts on one portal exhaust the other. Each phone keeps the normal
+ * budget; the shared network cap is wider so both portals fit.
+ */
+export function signInBuckets(opts: {
+  prefix: string;
+  identity: string;
+  phone?: string;
+  limit: number;
+}): SignInBucket[] {
+  if (opts.prefix === 'rl:auth' && opts.phone) {
+    return [
+      { key: `${opts.prefix}:phone:${opts.phone}`, limit: opts.limit },
+      {
+        key: `${opts.prefix}:net:${opts.identity}`,
+        limit: Math.max(opts.limit, 60),
+      },
+    ];
+  }
+  return [{ key: `${opts.prefix}:${opts.identity}`, limit: opts.limit }];
+}
+
+export function phoneFromAuthBody(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const phone = (body as { phoneNumber?: unknown }).phoneNumber;
+  if (typeof phone !== 'string') return undefined;
+  const trimmed = phone.trim();
+  return PHONE_KEY.test(trimmed) ? trimmed : undefined;
+}
+
 @Injectable()
 export class RedisRateLimitGuard implements CanActivate {
   private readonly logger = new Logger(RedisRateLimitGuard.name);
@@ -42,24 +77,24 @@ export class RedisRateLimitGuard implements CanActivate {
     const identity = this.resolveIdentity(req, options);
     const limit = this.resolveLimit(options);
     const windowSec = options.windowSec;
-    const bucket = `${options.prefix}:${identity}`;
+    const buckets = signInBuckets({
+      prefix: options.prefix,
+      identity,
+      phone: phoneFromAuthBody(req.body),
+      limit,
+    });
 
-    let count: number;
+    let tightest: { count: number; limit: number; key: string } | undefined;
     try {
-      // Atomic INCR + EXPIRE so a crash cannot leave a permanent ban key.
-      const result = await this.redis.eval(
-        `
-        local c = redis.call('INCR', KEYS[1])
-        if c == 1 then
-          redis.call('EXPIRE', KEYS[1], ARGV[1])
-        end
-        return c
-        `,
-        1,
-        bucket,
-        String(windowSec),
-      );
-      count = Number(result);
+      for (const bucket of buckets) {
+        const count = await this.increment(bucket.key, windowSec);
+        if (
+          !tightest ||
+          bucket.limit - count < tightest.limit - tightest.count
+        ) {
+          tightest = { count, limit: bucket.limit, key: bucket.key };
+        }
+      }
     } catch (error) {
       const failClosed =
         options.prefix === 'rl:auth' ||
@@ -81,19 +116,23 @@ export class RedisRateLimitGuard implements CanActivate {
       return true;
     }
 
-    const remaining = Math.max(0, limit - count);
-    res.setHeader('X-RateLimit-Limit', String(limit));
+    const active = tightest ?? { count: 0, limit, key: buckets[0]?.key ?? '' };
+    const remaining = Math.max(0, active.limit - active.count);
+    res.setHeader('X-RateLimit-Limit', String(active.limit));
     res.setHeader('X-RateLimit-Remaining', String(remaining));
     res.setHeader('X-RateLimit-Window', String(windowSec));
 
-    if (count > limit) {
-      const ttl = await this.redis.ttl(bucket);
+    if (active.count > active.limit) {
+      const ttl = await this.redis.ttl(active.key);
       const retryAfter = ttl > 0 ? ttl : windowSec;
       res.setHeader('Retry-After', String(retryAfter));
+      const phoneLimited = active.key.includes(':phone:');
       throw new HttpException(
         {
           statusCode: HttpStatus.TOO_MANY_REQUESTS,
-          message: 'Too many requests — slow down and retry',
+          message: phoneLimited
+            ? 'Too many sign-in attempts for this phone. The other portal is unaffected. Wait a moment and try again.'
+            : 'Too many sign-in attempts from this network. Wait a moment and try again.',
           retryAfter,
         },
         HttpStatus.TOO_MANY_REQUESTS,
@@ -101,6 +140,23 @@ export class RedisRateLimitGuard implements CanActivate {
     }
 
     return true;
+  }
+
+  /** Atomic INCR + EXPIRE so a crash cannot leave a permanent ban key. */
+  private async increment(bucket: string, windowSec: number): Promise<number> {
+    const result = await this.redis.eval(
+      `
+      local c = redis.call('INCR', KEYS[1])
+      if c == 1 then
+        redis.call('EXPIRE', KEYS[1], ARGV[1])
+      end
+      return c
+      `,
+      1,
+      bucket,
+      String(windowSec),
+    );
+    return Number(result);
   }
 
   private resolveLimit(options: RateLimitOptions): number {
