@@ -53,7 +53,7 @@ export class GovLegalAndReportJobs1789910000000 implements MigrationInterface {
         "deadlineAt" timestamptz,
         "assignedOfficerId" uuid,
         "createdByOfficerId" uuid NOT NULL,
-        "fulfilNotes" text,
+        "fulfilmentNotes" text,
         "createdAt" timestamptz NOT NULL DEFAULT now(),
         "updatedAt" timestamptz NOT NULL DEFAULT now()
       )
