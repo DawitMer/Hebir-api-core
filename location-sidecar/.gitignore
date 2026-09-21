@@ -1,0 +1,6 @@
+/location-svc
+*.log
+.DS_Store
+secrets.json
+.env
+.env.local
