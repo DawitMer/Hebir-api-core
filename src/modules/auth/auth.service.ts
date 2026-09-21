@@ -328,10 +328,19 @@ export class AuthService {
       if (!existing)
         return { error: new UnauthorizedException('Invalid refresh token') };
       if (existing.revokedAt) {
-        await this.revokeAllForUser(existing.userId, em);
+        // A dashboard fires several calls at once. The loser of that race
+        // must not revoke the session that just refreshed, or the open
+        // portal dies while the other one is in use.
+        const rotatedRecently =
+          Date.now() - existing.revokedAt.getTime() < 60_000;
+        if (!rotatedRecently) {
+          await this.revokeAllForUser(existing.userId, em);
+        }
         return {
           error: new UnauthorizedException(
-            'Refresh token reuse detected — sessions revoked',
+            rotatedRecently
+              ? 'Sign-in was already refreshed.'
+              : 'Refresh token reuse detected — sessions revoked',
           ),
         };
       }
