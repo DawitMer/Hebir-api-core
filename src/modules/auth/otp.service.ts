@@ -15,7 +15,6 @@ import { REDIS_CLIENT } from '../../redis/redis.module';
 import { SmsService } from './sms.service';
 import { IsString, Length, Matches } from 'class-validator';
 import { ETHIOPIA_E164 } from './dto/register.dto';
-import { treatAsProductionRuntime } from '../../config/public-api-host';
 
 export class RequestOtpDto {
   @Matches(ETHIOPIA_E164, {
@@ -50,9 +49,9 @@ const PHONE_REQUEST_WINDOW_SEC = 3600;
 
 /**
  * Phone OTP for signup/login step-up. Codes are stored hashed in Redis.
- * Debug codes and the universal sandbox OTP are allowed only on local
- * development/test — never when PUBLIC_API_BASE_URL is the live Hebir host,
- * even if NODE_ENV was mis-set to development.
+ * While NODE_ENV is development or test, every sign-in uses the demo code
+ * 123456 (ops, government, rider, and driver), including the public API host.
+ * Production mode sends a real SMS code and does not accept 123456.
  */
 @Injectable()
 export class OtpService {
@@ -197,14 +196,6 @@ export class OtpService {
   }
 
   private allowDebugOtp(): boolean {
-    if (
-      treatAsProductionRuntime(
-        this.config.get<string>('NODE_ENV'),
-        this.config.get<string>('PUBLIC_API_BASE_URL'),
-      )
-    ) {
-      return false;
-    }
     const nodeEnv = this.config.get<string>('NODE_ENV');
     return nodeEnv === 'development' || nodeEnv === 'test';
   }

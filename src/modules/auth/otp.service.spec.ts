@@ -126,7 +126,7 @@ describe('OtpService', () => {
     );
   });
 
-  it('returns debugCode only on local development, not the public API host', async () => {
+  it('returns demo code 123456 in development', async () => {
     const local = new OtpService(
       redis as never,
       configOf({
@@ -144,8 +144,8 @@ describe('OtpService', () => {
     expect(sms.sendOtp).not.toHaveBeenCalled();
   });
 
-  it('does not leak debugCode when NODE_ENV is development on the public host', async () => {
-    const misconfiguredLive = new OtpService(
+  it('uses demo code 123456 on the public host while NODE_ENV is development', async () => {
+    const liveDemo = new OtpService(
       redis as never,
       configOf({
         NODE_ENV: 'development',
@@ -154,23 +154,30 @@ describe('OtpService', () => {
       }),
       sms as unknown as SmsService,
     );
-    await expect(misconfiguredLive.request(phone)).rejects.toBeInstanceOf(
-      ServiceUnavailableException,
-    );
+    await expect(liveDemo.request(phone)).resolves.toEqual({
+      sent: true,
+      expiresInSec: 300,
+      debugCode: '123456',
+    });
+    await expect(liveDemo.consumeCode(phone, '123456')).resolves.toBeUndefined();
+    expect(sms.sendOtp).not.toHaveBeenCalled();
   });
 
-  it('rejects the universal sandbox OTP on the public API host', async () => {
-    const misconfiguredLive = new OtpService(
+  it('rejects the demo code when NODE_ENV is production', async () => {
+    const prod = new OtpService(
       redis as never,
       configOf({
-        NODE_ENV: 'development',
+        NODE_ENV: 'production',
         JWT_ACCESS_SECRET: 'test-pepper',
         PUBLIC_API_BASE_URL: 'https://api.hebirtaxi.com',
       }),
       sms as unknown as SmsService,
     );
-    await expect(
-      misconfiguredLive.consumeCode(phone, '123456'),
-    ).rejects.toThrow('Invalid or expired OTP');
+    await expect(prod.request(phone)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+    await expect(prod.consumeCode(phone, '123456')).rejects.toThrow(
+      'Invalid or expired OTP',
+    );
   });
 });
