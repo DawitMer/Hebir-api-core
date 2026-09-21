@@ -21,7 +21,7 @@ describe('sign-in rate limit buckets', () => {
     expect(ops[0]?.limit).toBe(10);
     expect(gov[0]?.limit).toBe(10);
     expect(ops[1]?.key).toBe(gov[1]?.key);
-    expect(ops[1]?.limit).toBeGreaterThanOrEqual(60);
+    expect(ops[1]?.limit).toBe(40);
   });
 
   it('keeps non-phone auth calls on the network identity', () => {

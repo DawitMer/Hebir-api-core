@@ -34,7 +34,8 @@ export function signInBuckets(opts: {
       { key: `${opts.prefix}:phone:${opts.phone}`, limit: opts.limit },
       {
         key: `${opts.prefix}:net:${opts.identity}`,
-        limit: Math.max(opts.limit, 60),
+        // Wider than one phone so operations and government each keep a full budget.
+        limit: opts.limit * 4,
       },
     ];
   }
