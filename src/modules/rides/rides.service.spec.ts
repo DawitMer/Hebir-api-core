@@ -464,6 +464,25 @@ describe('RidesService.cancelRide rematch', () => {
     );
   });
 
+  it('restarts searching when the assigned driver cancels while arriving', async () => {
+    const { service, dispatchQueue, notifications } = build(
+      assignedRide(RideStatus.ARRIVING),
+    );
+
+    const result = await service.cancelRide(rideId, driverId, 'car issue');
+
+    expect(result.status).toBe(RideStatus.SEARCHING);
+    expect(result.driverId).toBeNull();
+    expect(dispatchQueue.enqueueDispatch).toHaveBeenCalledWith(rideId, 0, [
+      driverId,
+    ]);
+    expect(notifications.notify).toHaveBeenCalledWith(
+      riderId,
+      'ride.rematching',
+      expect.objectContaining({ rideId }),
+    );
+  });
+
   it('keeps a rider cancel terminal', async () => {
     const { service, dispatchQueue, notifications } = build(
       assignedRide(RideStatus.ACCEPTED),
