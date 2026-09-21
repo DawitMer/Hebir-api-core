@@ -39,14 +39,25 @@ export function treatAsProductionFromEnv(
   return treatAsProductionRuntime(env.NODE_ENV, env.PUBLIC_API_BASE_URL);
 }
 
+/** Normalize Nest/Config boolean-ish env values (`false`, false, "FALSE`). */
+function envFlag(value: unknown): 'true' | 'false' | undefined {
+  if (value === true || value === false) return value ? 'true' : 'false';
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true') return 'true';
+  if (normalized === 'false') return 'false';
+  return undefined;
+}
+
 /** Drivers cannot go online without APPROVED KYC on the public API. */
 export function isDriverKycEnforced(opts: {
-  requireDriverKyc?: string | null;
+  requireDriverKyc?: string | boolean | null;
   nodeEnv?: string | null;
   publicApiBaseUrl?: string | null;
 }): boolean {
-  if (opts.requireDriverKyc === 'true') return true;
-  if (opts.requireDriverKyc === 'false') return false;
+  const flag = envFlag(opts.requireDriverKyc);
+  if (flag === 'true') return true;
+  if (flag === 'false') return false;
   return treatAsProductionRuntime(opts.nodeEnv, opts.publicApiBaseUrl);
 }
 

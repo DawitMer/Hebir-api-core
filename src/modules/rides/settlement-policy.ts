@@ -20,19 +20,62 @@ export interface ChargedSettlement {
 }
 
 /**
- * Industry-standard upfront pricing when the trip meter is unreliable:
+ * Final fare from the universal FareService formula (locked rates × actual
+ * distance/time). Destination completions keep an upfront-price safety net:
  * - Continuous meter → charge metered fare.
  * - Gap/stale estimate → charge min(estimate, quoted).
- * - Zero accepted GPS → charge the quoted fare (driver is never blocked).
+ * - Zero accepted GPS at destination → charge the quoted fare.
+ *
+ * Early drop-off always charges the metered (actual) fare — never invents the
+ * remaining trip or forces the original quote.
+ *
+ * Also: whenever the universal metered total is below the quote and we have
+ * any recorded meters, prefer that metered total (short / early trips).
  */
 export function chooseChargedSettlement(args: {
   meter: TripMeterSettlement;
   meteredFare: FareBreakdown;
   quotedFare: FareBreakdown;
   quotedDistanceM: number | null | undefined;
+  /** Completed away from the destination pin. */
+  earlyDropoff?: boolean;
 }): ChargedSettlement {
   const quotedTotal = Math.max(0, Math.round(args.quotedFare.total));
   const zeroGps = args.meter.recordedDistanceM <= 0;
+  const meteredTotal = Math.max(0, Math.round(args.meteredFare.total));
+
+  if (args.earlyDropoff) {
+    return {
+      status:
+        zeroGps || args.meter.estimated
+          ? RideSettlementStatus.ESTIMATED
+          : RideSettlementStatus.METERED,
+      estimateReason: zeroGps
+        ? 'zero_gps'
+        : args.meter.estimated
+          ? 'gps_gap'
+          : null,
+      billedDistanceM: args.meter.distanceM,
+      fare: args.meteredFare,
+      quotedFareTotal: quotedTotal,
+      uncappedFareTotal: meteredTotal,
+    };
+  }
+
+  // Shorter than quote with real GPS → charge actual, even at the pin
+  // (e.g. rider exited early but last fix drifted near drop-off).
+  if (!zeroGps && meteredTotal < quotedTotal) {
+    return {
+      status: args.meter.estimated
+        ? RideSettlementStatus.ESTIMATED
+        : RideSettlementStatus.METERED,
+      estimateReason: args.meter.estimated ? 'gps_gap' : null,
+      billedDistanceM: args.meter.distanceM,
+      fare: args.meteredFare,
+      quotedFareTotal: quotedTotal,
+      uncappedFareTotal: meteredTotal,
+    };
+  }
 
   if (zeroGps) {
     return {
@@ -52,28 +95,30 @@ export function chooseChargedSettlement(args: {
       billedDistanceM: args.meter.distanceM,
       fare: args.meteredFare,
       quotedFareTotal: quotedTotal,
-      uncappedFareTotal: Math.round(args.meteredFare.total),
+      uncappedFareTotal: meteredTotal,
     };
   }
 
-  const uncapped = Math.max(0, Math.round(args.meteredFare.total));
-  if (uncapped <= quotedTotal) {
+  if (meteredTotal <= quotedTotal) {
     return {
       status: RideSettlementStatus.ESTIMATED,
       estimateReason: 'gps_gap',
       billedDistanceM: args.meter.distanceM,
       fare: args.meteredFare,
       quotedFareTotal: quotedTotal,
-      uncappedFareTotal: uncapped,
+      uncappedFareTotal: meteredTotal,
     };
   }
 
   return {
     status: RideSettlementStatus.ESTIMATED,
     estimateReason: 'gps_gap',
-    billedDistanceM: Math.max(0, Math.round(args.quotedDistanceM ?? args.meter.distanceM)),
+    billedDistanceM: Math.max(
+      0,
+      Math.round(args.quotedDistanceM ?? args.meter.distanceM),
+    ),
     fare: args.quotedFare,
     quotedFareTotal: quotedTotal,
-    uncappedFareTotal: uncapped,
+    uncappedFareTotal: meteredTotal,
   };
 }

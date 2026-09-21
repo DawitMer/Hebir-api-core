@@ -76,7 +76,9 @@ import {
 } from './ride-live-track';
 import {
   ARRIVE_RADIUS_M,
+  FARE_AT_DESTINATION_RADIUS_M,
   START_RADIUS_M,
+  isWithinRadius,
   metresBetween,
 } from './ride-geofence';
 import { settleTripMeterDistance } from './gps-gap-settlement';
@@ -1071,6 +1073,25 @@ export class RidesService {
       }
       const actualRoute = routePoints.map(({ lat, lng }) => ({ lat, lng }));
 
+      // Early drop-off: last fix is outside the fare destination neighbourhood,
+      // or the trip meter is clearly shorter than the quoted road distance.
+      // Bill actual traveled meters + elapsed time via the universal fare
+      // formula — never invent remaining distance to the original pin.
+      const nearDropoffForFare = !!(
+        checkpoint.lastFix &&
+        Number.isFinite(checkpoint.lastFix.lat) &&
+        Number.isFinite(checkpoint.lastFix.lng) &&
+        isWithinRadius(
+          checkpoint.lastFix,
+          lockedRide.dropoff,
+          FARE_AT_DESTINATION_RADIUS_M,
+        )
+      );
+      const quotedM = Math.max(0, lockedRide.distanceM ?? 0);
+      const clearlyShorterThanQuote =
+        quotedM > 0 && recordedDistM > 0 && recordedDistM < quotedM * 0.85;
+      const earlyDropoff = !nearDropoffForFare || clearlyShorterThanQuote;
+
       const billedMeter = settleTripMeterDistance({
         recordedDistanceM: recordedDistM,
         lastFix: checkpoint.lastFix,
@@ -1078,6 +1099,7 @@ export class RidesService {
         quotedDistanceM: lockedRide.distanceM,
         hasGaps: checkpoint.hasGaps,
         lastFixAgeMs: Date.now() - checkpoint.lastFix.timestampMs,
+        fillRemainingToDropoff: !earlyDropoff,
       });
 
       const completedAt = new Date();
@@ -1119,6 +1141,7 @@ export class RidesService {
         meteredFare,
         quotedFare,
         quotedDistanceM: lockedRide.distanceM,
+        earlyDropoff,
       });
       const actualDistanceM = charged.billedDistanceM;
       const fareBreakdown = charged.fare;
@@ -1127,6 +1150,7 @@ export class RidesService {
         gpsGapEstimated: charged.status === RideSettlementStatus.ESTIMATED,
         settlementStatus: charged.status,
         estimateReason: charged.estimateReason,
+        earlyDropoff,
         recordedDistanceM: billedMeter.recordedDistanceM,
         billedDistanceM: charged.billedDistanceM,
         quotedFareTotal: charged.quotedFareTotal,
@@ -2338,6 +2362,8 @@ export class RidesService {
         : undefined;
       const fareRec = fareByRide.get(ride.id);
       const estFare = calculatedFares[idx];
+      const storedBreakdown =
+        (ride.fareBreakdown as Record<string, unknown> | null) ?? null;
 
       const distanceKm =
         ride.actualDistanceM != null
@@ -2365,6 +2391,13 @@ export class RidesService {
               waitCharge: 0,
               surgeMultiplier: Number(fareRec.surgeMultiplier),
               platformFee: Number(fareRec.platformFee),
+              settlementStatus:
+                storedBreakdown?.settlementStatus ?? ride.settlementStatus,
+              estimateReason: storedBreakdown?.estimateReason ?? null,
+              earlyDropoff: storedBreakdown?.earlyDropoff === true,
+              gpsGapEstimated:
+                storedBreakdown?.gpsGapEstimated === true ||
+                ride.settlementStatus === RideSettlementStatus.ESTIMATED,
             }
           : {
               total: estFare.total,
@@ -3202,10 +3235,17 @@ export class RidesService {
   }
 
   private isKycEnforced(): boolean {
+    // Prefer ConfigService, but fall back to process.env — Nest validate can
+    // drop or boolean-coerce optional string flags under implicit conversion.
+    const requireDriverKyc =
+      this.config.get<string | boolean>('REQUIRE_DRIVER_KYC') ??
+      process.env.REQUIRE_DRIVER_KYC;
     return isDriverKycEnforced({
-      requireDriverKyc: this.config.get<string>('REQUIRE_DRIVER_KYC'),
-      nodeEnv: this.config.get<string>('NODE_ENV'),
-      publicApiBaseUrl: this.config.get<string>('PUBLIC_API_BASE_URL'),
+      requireDriverKyc,
+      nodeEnv: this.config.get<string>('NODE_ENV') ?? process.env.NODE_ENV,
+      publicApiBaseUrl:
+        this.config.get<string>('PUBLIC_API_BASE_URL') ??
+        process.env.PUBLIC_API_BASE_URL,
     });
   }
 

@@ -121,4 +121,70 @@ describe('chooseChargedSettlement', () => {
     expect(result.fare.total).toBe(140);
     expect(result.billedDistanceM).toBe(5000);
   });
+
+  it('charges the universal metered fare on early drop-off, not the quote', () => {
+    const meter = settleTripMeterDistance({
+      recordedDistanceM: 1500,
+      lastFix: pickup,
+      dropoff,
+      quotedDistanceM: 5000,
+      hasGaps: true,
+      lastFixAgeMs: 30_000,
+      fillRemainingToDropoff: false,
+    });
+    const result = chooseChargedSettlement({
+      meter,
+      meteredFare: fare(85, 1.5),
+      quotedFare: fare(160, 5),
+      quotedDistanceM: 5000,
+      earlyDropoff: true,
+    });
+    expect(result.fare.total).toBe(85);
+    expect(result.billedDistanceM).toBe(1500);
+    expect(result.quotedFareTotal).toBe(160);
+    expect(result.status).toBe(RideSettlementStatus.ESTIMATED);
+    expect(result.estimateReason).toBe('gps_gap');
+  });
+
+  it('still meters a continuous early drop-off below the quote', () => {
+    const meter = settleTripMeterDistance({
+      recordedDistanceM: 2100,
+      lastFix: pickup,
+      dropoff,
+      quotedDistanceM: 5000,
+      hasGaps: false,
+      lastFixAgeMs: 3_000,
+      fillRemainingToDropoff: false,
+    });
+    const result = chooseChargedSettlement({
+      meter,
+      meteredFare: fare(95, 2.1),
+      quotedFare: fare(160, 5),
+      quotedDistanceM: 5000,
+      earlyDropoff: true,
+    });
+    expect(result.status).toBe(RideSettlementStatus.METERED);
+    expect(result.fare.total).toBe(95);
+    expect(result.estimateReason).toBeNull();
+  });
+
+  it('prefers metered when shorter than quote even if marked at destination', () => {
+    const meter = settleTripMeterDistance({
+      recordedDistanceM: 2000,
+      lastFix: dropoff,
+      dropoff,
+      quotedDistanceM: 5000,
+      hasGaps: false,
+      lastFixAgeMs: 2_000,
+    });
+    const result = chooseChargedSettlement({
+      meter,
+      meteredFare: fare(100, 2),
+      quotedFare: fare(160, 5),
+      quotedDistanceM: 5000,
+      earlyDropoff: false,
+    });
+    expect(result.fare.total).toBe(100);
+    expect(result.quotedFareTotal).toBe(160);
+  });
 });

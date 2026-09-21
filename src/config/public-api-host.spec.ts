@@ -44,6 +44,13 @@ describe('public-api-host', () => {
     ).toBe(false);
     expect(
       isDriverKycEnforced({
+        requireDriverKyc: false,
+        nodeEnv: 'development',
+        publicApiBaseUrl: 'https://api.hebirtaxi.com',
+      }),
+    ).toBe(false);
+    expect(
+      isDriverKycEnforced({
         nodeEnv: 'development',
         publicApiBaseUrl: 'http://127.0.0.1:3000',
       }),

@@ -60,4 +60,22 @@ describe('settleTripMeterDistance', () => {
     expect(result.estimated).toBe(true);
     expect(result.distanceM).toBeGreaterThan(1000);
   });
+
+  it('does not invent remaining distance on early drop-off', () => {
+    const result = settleTripMeterDistance({
+      recordedDistanceM: 1200,
+      lastFix: pickup,
+      dropoff,
+      quotedDistanceM: 5000,
+      hasGaps: true,
+      lastFixAgeMs: 180_000,
+      fillRemainingToDropoff: false,
+    });
+    expect(result).toEqual({
+      distanceM: 1200,
+      estimated: true,
+      recordedDistanceM: 1200,
+      estimatedAddedM: 0,
+    });
+  });
 });

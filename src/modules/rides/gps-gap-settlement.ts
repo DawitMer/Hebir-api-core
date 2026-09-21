@@ -14,9 +14,13 @@ export interface TripMeterSettlement {
 }
 
 /**
- * GPS-gap fare policy: bill recorded GNSS distance plus a capped estimate of
- * the remaining last-fix → dropoff chord. Never substitute a pure straight-line
- * quote for a metered trip, and never discard recorded meters.
+ * GPS-gap fare policy near the destination: bill recorded GNSS distance plus a
+ * capped estimate of the remaining last-fix → dropoff chord. Never substitute
+ * a pure straight-line quote for a metered trip, and never discard recorded
+ * meters.
+ *
+ * Early drop-off (`fillRemainingToDropoff: false`) bills recorded meters only —
+ * never invents the undriven remainder to the original pin.
  */
 export function settleTripMeterDistance(args: {
   recordedDistanceM: number;
@@ -25,8 +29,24 @@ export function settleTripMeterDistance(args: {
   quotedDistanceM?: number | null;
   hasGaps: boolean;
   lastFixAgeMs: number;
+  /**
+   * When false (early drop-off), do not add last-fix → dropoff. Defaults to
+   * true so destination completions keep the gap-fill safety net.
+   */
+  fillRemainingToDropoff?: boolean;
 }): TripMeterSettlement {
   const recorded = Math.max(0, Math.round(args.recordedDistanceM));
+  const fillRemaining = args.fillRemainingToDropoff !== false;
+  if (!fillRemaining) {
+    const noisy = args.hasGaps || args.lastFixAgeMs > STALE_FIX_MS;
+    return {
+      distanceM: recorded,
+      estimated: noisy,
+      recordedDistanceM: recorded,
+      estimatedAddedM: 0,
+    };
+  }
+
   const needsEstimate = args.hasGaps || args.lastFixAgeMs > STALE_FIX_MS;
   if (!needsEstimate) {
     return {
