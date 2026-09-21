@@ -126,6 +126,23 @@ describe('OtpService', () => {
     );
   });
 
+  it('does not throttle demo code requests in development', async () => {
+    const local = new OtpService(
+      redis as never,
+      configOf({
+        NODE_ENV: 'development',
+        JWT_ACCESS_SECRET: 'test-pepper',
+      }),
+      sms as unknown as SmsService,
+    );
+    await redis.setex(`otp:cooldown:${phone}`, 25, '1');
+    redis.incr.mockResolvedValueOnce(6);
+    await expect(local.request(phone)).resolves.toMatchObject({
+      sent: true,
+      debugCode: '123456',
+    });
+  });
+
   it('returns demo code 123456 in development', async () => {
     const local = new OtpService(
       redis as never,

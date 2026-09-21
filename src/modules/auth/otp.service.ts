@@ -75,8 +75,12 @@ export class OtpService {
       );
     }
 
-    await this.enforceResendCooldown(phoneNumber);
-    await this.enforcePhoneRequestLimit(phoneNumber);
+    // Demo code 123456 is not a secret. The resend and hourly caps made
+    // repeated portal sign-in return 429 while NODE_ENV is development.
+    if (!debug) {
+      await this.enforceResendCooldown(phoneNumber);
+      await this.enforcePhoneRequestLimit(phoneNumber);
+    }
 
     const code = debug ? '123456' : String(randomInt(100000, 999999));
     const otpKey = `${OTP_PREFIX}${phoneNumber}`;
