@@ -161,7 +161,7 @@ export class RideAdSettlement {
 }
 
 @Entity('driver_wallet_entries')
-@Index(['rideId'], { unique: true, where: '"rideId" IS NOT NULL' })
+@Index(['rideId', 'type'], { unique: true, where: '"rideId" IS NOT NULL' })
 export class DriverWalletEntry {
   @PrimaryGeneratedColumn('uuid') id: string;
   @Column({ type: 'uuid' }) driverId: string;

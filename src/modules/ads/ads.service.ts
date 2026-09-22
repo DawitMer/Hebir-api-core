@@ -434,6 +434,28 @@ export class AdRewardsService {
     return settled;
   }
 
+  /**
+   * Reimburse the driver for a rider promo code. Same wallet as ad credits —
+   * the rider paid less cash; Hebir owes that slice to the driver.
+   */
+  async creditPromoDiscount(
+    em: EntityManager,
+    ride: Ride,
+    discountMinor: number,
+  ): Promise<number> {
+    const discount = Math.max(0, Math.round(discountMinor));
+    if (!ride.driverId || discount <= 0) return 0;
+    await em.save(
+      em.create(DriverWalletEntry, {
+        driverId: ride.driverId,
+        rideId: ride.id,
+        amountMinor: discount,
+        type: 'promo_discount_credit',
+      }),
+    );
+    return discount;
+  }
+
   // --------------------------------------------------------------- driver
 
   async walletSummary(driverId: string) {
@@ -445,15 +467,28 @@ export class AdRewardsService {
       where: { driverId },
       order: { createdAt: 'DESC' },
     });
-    const available = entries.reduce((n, e) => n + e.amountMinor, 0);
+    const credited = entries
+      .filter((e) => e.amountMinor > 0)
+      .reduce((n, e) => n + e.amountMinor, 0);
+    const adCredited = entries
+      .filter((e) => e.type === 'ad_discount_credit')
+      .reduce((n, e) => n + e.amountMinor, 0);
+    const promoCredited = entries
+      .filter((e) => e.type === 'promo_discount_credit')
+      .reduce((n, e) => n + e.amountMinor, 0);
     const pending = cashouts
       .filter((x) =>
         [CashoutState.REQUESTED, CashoutState.PROCESSING].includes(x.state),
       )
       .reduce((n, x) => n + x.amountMinor, 0);
+    const net = entries.reduce((n, e) => n + e.amountMinor, 0);
     return {
-      availableMinor: Math.max(0, available - pending),
+      availableMinor: Math.max(0, net - pending),
       pendingMinor: pending,
+      /** Lifetime positive credits (ads + promos) before cashouts. */
+      totalCreditedMinor: credited,
+      adCreditsMinor: adCredited,
+      promoCreditsMinor: promoCredited,
       entries,
       cashouts,
     };
@@ -469,6 +504,40 @@ export class AdRewardsService {
       where: { rideId: In(unique) },
     });
     return new Map(rows.map((row) => [row.rideId, row]));
+  }
+
+  /** Per-ride Hebir wallet credits (ads + promos) for driver/rider receipts. */
+  async walletCreditsByRideIds(
+    rideIds: string[],
+  ): Promise<
+    Map<string, { adMinor: number; promoMinor: number; totalMinor: number }>
+  > {
+    const unique = [...new Set(rideIds.filter(Boolean))];
+    if (!unique.length) return new Map();
+    const rows = await this.wallet.find({
+      where: {
+        rideId: In(unique),
+        type: In(['ad_discount_credit', 'promo_discount_credit']),
+      },
+    });
+    const map = new Map<
+      string,
+      { adMinor: number; promoMinor: number; totalMinor: number }
+    >();
+    for (const row of rows) {
+      if (!row.rideId) continue;
+      const cur = map.get(row.rideId) ?? {
+        adMinor: 0,
+        promoMinor: 0,
+        totalMinor: 0,
+      };
+      if (row.type === 'ad_discount_credit') cur.adMinor += row.amountMinor;
+      if (row.type === 'promo_discount_credit')
+        cur.promoMinor += row.amountMinor;
+      cur.totalMinor = cur.adMinor + cur.promoMinor;
+      map.set(row.rideId, cur);
+    }
+    return map;
   }
 
   async requestCashout(driverId: string, amountMinor: number) {

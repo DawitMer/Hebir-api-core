@@ -103,7 +103,9 @@ export type EnrichedRide = Omit<Ride, 'fare'> & {
   riderCashDueEtb?: number | null;
   /** Advertising discount applied to this trip (ETB). */
   advertisingDiscountEtb?: number | null;
-  /** Hebir wallet credit owed to the driver for that discount (ETB). */
+  /** Promo-code discount applied to this trip (ETB). */
+  promotionDiscountEtb?: number | null;
+  /** Hebir wallet credit owed to the driver for rider discounts (ETB). */
   driverHebirCreditEtb?: number | null;
   driver: {
     fullName: string | null;
@@ -1234,13 +1236,28 @@ export class RidesService {
             em,
             rideId,
             lockedRide.riderId,
-            Math.round(Number(fareRecord.total) * 100),
+            Math.max(
+              0,
+              Math.round(Number(fareRecord.total) * 100) -
+                adSettlement.appliedDiscountMinor,
+            ),
           )
         : { appliedDiscountMinor: 0 };
+
+      const promoCreditMinor =
+        this.adRewards && promoSettlement.appliedDiscountMinor > 0
+          ? await this.adRewards.creditPromoDiscount(
+              em,
+              lockedRide,
+              promoSettlement.appliedDiscountMinor,
+            )
+          : 0;
 
       const combinedDiscountMinor =
         adSettlement.appliedDiscountMinor +
         promoSettlement.appliedDiscountMinor;
+      const driverHebirCreditMinor =
+        adSettlement.driverHebirCreditMinor + promoCreditMinor;
       const finalRiderCashDueMinor = Math.max(
         0,
         Math.round(Number(fareRecord.total) * 100) - combinedDiscountMinor,
@@ -1291,6 +1308,7 @@ export class RidesService {
         riderCashDue,
         adSettlement,
         promoSettlement,
+        driverHebirCreditMinor,
         actualDistanceM,
         actualDurationS,
         settlementStatus: charged.status,
@@ -1306,6 +1324,7 @@ export class RidesService {
       riderCashDue,
       adSettlement,
       promoSettlement,
+      driverHebirCreditMinor,
       actualDistanceM,
       actualDurationS,
       settlementStatus,
@@ -1360,8 +1379,8 @@ export class RidesService {
       promotionDiscount: promoSettlement?.appliedDiscountMinor
         ? (promoSettlement.appliedDiscountMinor / 100).toFixed(2)
         : '0.00',
-      driverHebirCredit: adSettlement?.driverHebirCreditMinor
-        ? (adSettlement.driverHebirCreditMinor / 100).toFixed(2)
+      driverHebirCredit: driverHebirCreditMinor
+        ? (driverHebirCreditMinor / 100).toFixed(2)
         : '0.00',
       settlementStatus,
       settlementReviewCaseNumber:
@@ -2287,24 +2306,35 @@ export class RidesService {
       ),
     ];
 
-    const [fares, tips, drivers, vehicles, profiles, photoByDriver, adByRide] =
-      await Promise.all([
-        this.fares.find({ where: { rideId: In(rideIds) } }),
-        this.tips.find({ where: { rideId: In(rideIds) } }),
-        driverIds.length
-          ? this.users.find({ where: { id: In(driverIds) } })
-          : Promise.resolve<UserAccount[]>([]),
-        driverIds.length
-          ? this.vehicles.find({ where: { driverId: In(driverIds) } })
-          : Promise.resolve<Vehicle[]>([]),
-        driverIds.length
-          ? this.driverProfiles.find({ where: { userId: In(driverIds) } })
-          : Promise.resolve<DriverProfile[]>([]),
-        this.kycService.mapDriverPhotoUrls(driverIds),
-        this.adRewards
-          ? this.adRewards.settlementsByRideIds(rideIds)
-          : Promise.resolve(new Map()),
-      ]);
+    const [
+      fares,
+      tips,
+      drivers,
+      vehicles,
+      profiles,
+      photoByDriver,
+      adByRide,
+      walletByRide,
+    ] = await Promise.all([
+      this.fares.find({ where: { rideId: In(rideIds) } }),
+      this.tips.find({ where: { rideId: In(rideIds) } }),
+      driverIds.length
+        ? this.users.find({ where: { id: In(driverIds) } })
+        : Promise.resolve<UserAccount[]>([]),
+      driverIds.length
+        ? this.vehicles.find({ where: { driverId: In(driverIds) } })
+        : Promise.resolve<Vehicle[]>([]),
+      driverIds.length
+        ? this.driverProfiles.find({ where: { userId: In(driverIds) } })
+        : Promise.resolve<DriverProfile[]>([]),
+      this.kycService.mapDriverPhotoUrls(driverIds),
+      this.adRewards
+        ? this.adRewards.settlementsByRideIds(rideIds)
+        : Promise.resolve(new Map()),
+      this.adRewards
+        ? this.adRewards.walletCreditsByRideIds(rideIds)
+        : Promise.resolve(new Map()),
+    ]);
 
     const fareByRide = new Map(fares.map((fare) => [fare.rideId, fare]));
     const tipByRide = new Map(tips.map((tip) => [tip.rideId, tip]));
@@ -2382,18 +2412,25 @@ export class RidesService {
       const storedBreakdown =
         (ride.fareBreakdown as Record<string, unknown> | null) ?? null;
       const ad = adByRide.get(ride.id);
+      const wallet = walletByRide.get(ride.id);
       const grossFareEtb = fareRec
         ? Number(fareRec.total)
         : estFare.total;
-      const advertisingDiscountEtb = ad
-        ? ad.appliedDiscountMinor / 100
-        : 0;
-      const riderCashDueEtb = ad
-        ? ad.riderCashDueMinor / 100
-        : grossFareEtb;
-      const driverHebirCreditEtb = ad
-        ? ad.driverHebirCreditMinor / 100
-        : 0;
+      const advertisingDiscountEtb = wallet
+        ? wallet.adMinor / 100
+        : ad
+          ? ad.appliedDiscountMinor / 100
+          : 0;
+      const promotionDiscountEtb = wallet ? wallet.promoMinor / 100 : 0;
+      const driverHebirCreditEtb = wallet
+        ? wallet.totalMinor / 100
+        : ad
+          ? ad.driverHebirCreditMinor / 100
+          : 0;
+      const riderCashDueEtb = Math.max(
+        0,
+        grossFareEtb - advertisingDiscountEtb - promotionDiscountEtb,
+      );
 
       const distanceKm =
         ride.actualDistanceM != null
@@ -2415,6 +2452,7 @@ export class RidesService {
         grossFareEtb,
         riderCashDueEtb,
         advertisingDiscountEtb,
+        promotionDiscountEtb,
         driverHebirCreditEtb,
         estimatedFare: fareRec
           ? {
@@ -2434,6 +2472,7 @@ export class RidesService {
                 ride.settlementStatus === RideSettlementStatus.ESTIMATED,
               riderCashDueEtb,
               advertisingDiscountEtb,
+              promotionDiscountEtb,
               driverHebirCreditEtb,
             }
           : {
@@ -2445,6 +2484,10 @@ export class RidesService {
               surgeMultiplier: estFare.surgeMultiplier,
               vehicleMultiplier: estFare.vehicleMultiplier,
               platformFee: estFare.platformFee,
+              riderCashDueEtb,
+              advertisingDiscountEtb,
+              promotionDiscountEtb,
+              driverHebirCreditEtb,
             },
         // Internal dispatch bookkeeping — a rider must never learn which
         // driver an open offer went to before that driver accepts.
