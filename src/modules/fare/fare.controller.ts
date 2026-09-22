@@ -1,4 +1,11 @@
-import { Body, Controller, Get, Patch, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { Type } from 'class-transformer';
 import {
   IsLatitude,
@@ -16,6 +23,7 @@ import { FareRateKeys, FARE_RATE_DESCRIPTIONS } from './fare-rates';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { UserRole } from '../auth/entities/user-account.entity';
 import { zoneIdFor } from '../matching/geo/geo.util';
 import { RedisRateLimitGuard } from '../../common/rate-limit/redis-rate-limit.guard';
@@ -23,6 +31,9 @@ import {
   RateLimit,
   RateLimitPresets,
 } from '../../common/rate-limit/rate-limit.decorator';
+import { PermissionsGuard } from '../operations/permissions.guard';
+import { RequirePermissions } from '../operations/require-permissions.decorator';
+import { PricingVersionsService } from '../operations/pricing-versions.service';
 
 class GeoPointDto {
   @IsNumber()
@@ -103,6 +114,7 @@ export class FareController {
   constructor(
     private readonly fareService: FareService,
     private readonly configuration: ConfigurationService,
+    private readonly pricingVersions: PricingVersionsService,
   ) {}
 
   /** Public — Flutter apps load tunable rates from the real DB. */
@@ -120,21 +132,70 @@ export class FareController {
       this.fareService.estimateDurationMinutes(dto.distanceKm);
     const zoneId =
       dto.zoneId ?? (dto.pickup ? zoneIdFor(dto.pickup) : undefined);
-    const breakdown = await this.fareService.calculate({
-      distanceKm: dto.distanceKm,
-      durationMinutes,
-      waitMinutes: dto.waitMinutes,
-      zoneId,
-      vehicleType: dto.vehicleType,
-    });
-    return breakdown;
+    const { rates, version } = await this.pricingVersions.getActiveRates();
+    const breakdown = await this.fareService.calculate(
+      {
+        distanceKm: dto.distanceKm,
+        durationMinutes,
+        waitMinutes: dto.waitMinutes,
+        zoneId,
+        vehicleType: dto.vehicleType,
+        vehicleMultipliers: version?.vehicleMultipliers ?? null,
+      },
+      rates,
+    );
+    return {
+      ...breakdown,
+      pricingVersionId: version?.id ?? null,
+      pricingVersionLabel: version?.versionLabel ?? null,
+      currency: version?.currency ?? 'ETB',
+      calculatedAt: new Date().toISOString(),
+    };
   }
 
-  /** Ops/admin — change initial fee / per-meter without a code deploy. */
-  @UseGuards(JwtAuthGuard, RolesGuard)
+  /**
+   * Legacy ops shortcut — creates a draft pricing version and publishes it so
+   * history stays auditable. Prefer POST /operations/pricing + publish.
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
   @Roles(UserRole.ADMIN)
+  @RequirePermissions('pricing.publish')
   @Patch('rates')
-  async updateRates(@Body() dto: UpdateFareRatesDto) {
+  async updateRates(
+    @CurrentUser() user: { userId: string },
+    @Body() dto: UpdateFareRatesDto,
+  ) {
+    const current = this.fareService.getRates();
+    const next = {
+      ...current,
+      ...(typeof dto.initialFeeEtb === 'number'
+        ? { initialFeeEtb: dto.initialFeeEtb }
+        : {}),
+      ...(typeof dto.perMeterEtb === 'number'
+        ? { perMeterEtb: dto.perMeterEtb }
+        : {}),
+      ...(typeof dto.perMinuteEtb === 'number'
+        ? { perMinuteEtb: dto.perMinuteEtb }
+        : {}),
+      ...(typeof dto.perWaitMinuteEtb === 'number'
+        ? { perWaitMinuteEtb: dto.perWaitMinuteEtb }
+        : {}),
+      ...(typeof dto.minimumEtb === 'number'
+        ? { minimumEtb: dto.minimumEtb }
+        : {}),
+      ...(typeof dto.surgeMaxMultiplier === 'number'
+        ? { surgeMaxMultiplier: dto.surgeMaxMultiplier }
+        : {}),
+    };
+
+    const draft = await this.pricingVersions.createDraft(user.userId, {
+      versionLabel: `patch-${new Date().toISOString().slice(0, 19)}`,
+      rates: next,
+      notes: 'Created via PATCH /fare/rates (versioned)',
+    });
+    await this.pricingVersions.publishAndActivate(user.userId, draft.id);
+
+    // Keep description metadata fresh for configuration readers.
     const mapping: Array<[keyof UpdateFareRatesDto, string]> = [
       ['initialFeeEtb', FareRateKeys.initialFeeEtb],
       ['perMeterEtb', FareRateKeys.perMeterEtb],
@@ -143,7 +204,6 @@ export class FareController {
       ['minimumEtb', FareRateKeys.minimumEtb],
       ['surgeMaxMultiplier', FareRateKeys.surgeMaxMultiplier],
     ];
-
     const updates: Array<{ key: string; value: number; description: string }> =
       [];
     for (const [field, key] of mapping) {
@@ -157,8 +217,13 @@ export class FareController {
         });
       }
     }
+    if (updates.length) {
+      await this.configuration.setMany(updates);
+    }
 
-    await this.configuration.setMany(updates);
-    return this.fareService.ratesPublicView();
+    return {
+      ...this.fareService.ratesPublicView(),
+      pricingVersionId: draft.id,
+    };
   }
 }

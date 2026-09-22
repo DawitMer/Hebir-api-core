@@ -26,6 +26,7 @@ import { AdsModule } from '../ads/ads.module';
 import { TripRouteRecorderService } from './trip-route-recorder.service';
 
 import { PromotionsModule } from '../promotions/promotions.module';
+import { OperationsModule } from '../operations/operations.module';
 
 import { AdminRidesController } from './admin-rides.controller';
 import { AdminRidesService } from './admin-rides.service';
@@ -55,6 +56,7 @@ import { IncidentsModule } from '../incidents/incidents.module';
     AdsModule,
     PromotionsModule,
     IncidentsModule,
+    OperationsModule,
   ],
   controllers: [
     RidesController,

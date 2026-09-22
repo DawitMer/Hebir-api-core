@@ -33,6 +33,7 @@ import { GeocodingModule } from './common/geocoding/geocoding.module';
 import { AdsModule } from './modules/ads/ads.module';
 import { AdvertisersModule } from './modules/advertisers/advertisers.module';
 import { PromotionsModule } from './modules/promotions/promotions.module';
+import { OperationsModule } from './modules/operations/operations.module';
 import { treatAsProductionFromEnv } from './config/public-api-host';
 
 @Module({
@@ -118,6 +119,7 @@ import { treatAsProductionFromEnv } from './config/public-api-host';
     TipsModule,
     RatingsModule,
     PromotionsModule,
+    OperationsModule,
   ],
   controllers: [AppController, HealthController],
 })

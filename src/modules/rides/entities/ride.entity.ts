@@ -67,6 +67,10 @@ export class Ride {
   @Column({ type: 'timestamptz', nullable: true })
   matchedAt: Date | null;
 
+  /** Driver marked arrived at pickup (wait clock starts here). */
+  @Column({ type: 'timestamptz', nullable: true })
+  arrivedAt: Date | null;
+
   @Column({ type: 'timestamptz', nullable: true })
   startedAt: Date | null;
 
@@ -131,6 +135,10 @@ export class Ride {
 
   @Column({ type: 'varchar', length: 64, nullable: true })
   pricingVersion: string | null;
+
+  /** FK to pricing_versions — durable link for audit after rates change. */
+  @Column({ type: 'uuid', nullable: true })
+  pricingVersionId: string | null;
 
   /** `metered` when GNSS was continuous; `estimated` when quote-capped. */
   @Column({

@@ -52,6 +52,7 @@ import { RequestRideDto } from './dto/request-ride.dto';
 import { ListRideMessagesDto } from './dto/list-ride-messages.dto';
 import { DriverInitiatedRideDto } from './dto/driver-initiated-ride.dto';
 import { FareBreakdown, FareService } from '../fare/fare.service';
+import { PricingVersionsService } from '../operations/pricing-versions.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { KycService } from '../kyc/kyc.service';
 import { VerificationStatus } from '../kyc/entities/driver-verification.entity';
@@ -251,6 +252,7 @@ export class RidesService {
     @InjectRepository(PaymentRecord)
     private readonly payments: Repository<PaymentRecord>,
     private readonly fareService: FareService,
+    private readonly pricingVersions: PricingVersionsService,
     private readonly subscriptionService: SubscriptionService,
     private readonly kycService: KycService,
     private readonly notifications: NotificationsGateway,
@@ -270,6 +272,19 @@ export class RidesService {
     @Optional()
     private readonly incidentsService?: IncidentsService,
   ) {}
+
+  /** Locked category multipliers for a ride's pricing version (ops-configurable). */
+  private async vehicleMultipliersForRide(
+    ride: Pick<Ride, 'pricingVersionId'>,
+  ): Promise<Record<string, number> | null> {
+    if (!ride.pricingVersionId) return null;
+    try {
+      const version = await this.pricingVersions.get(ride.pricingVersionId);
+      return version.vehicleMultipliers ?? null;
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * Entry point for a rider requesting an on-demand ride. The ride is
@@ -305,14 +320,20 @@ export class RidesService {
       dto.durationMinutes,
     );
 
-    // Lock live surge at request so rider quote, driver offer, and final
-    // charge share one multiplier for this ride (especially when demand is high).
-    const quotedFare = await this.fareService.calculate({
-      distanceKm,
-      durationMinutes,
-      zoneId: zoneIdFor(dto.pickup),
-      vehicleType,
-    });
+    // Lock active pricing version + surge at request so quote, offer, and
+    // final charge stay auditable even after Operations publishes new rates.
+    const { rates: lockedRates, version: pricingVersion } =
+      await this.pricingVersions.getActiveRates();
+    const quotedFare = await this.fareService.calculate(
+      {
+        distanceKm,
+        durationMinutes,
+        zoneId: zoneIdFor(dto.pickup),
+        vehicleType,
+        vehicleMultipliers: pricingVersion?.vehicleMultipliers ?? null,
+      },
+      lockedRates,
+    );
 
     let ride: Ride;
     try {
@@ -328,6 +349,8 @@ export class RidesService {
           durationS: Math.round(durationMinutes * 60),
           quotedSurgeMultiplier: quotedFare.surgeMultiplier,
           quotedFareRates: quotedFare.rates,
+          pricingVersionId: pricingVersion?.id ?? null,
+          pricingVersion: pricingVersion?.versionLabel ?? pricingVersion?.id ?? null,
           status: RideStatus.SEARCHING,
           requestedAt: new Date(),
         }),
@@ -984,6 +1007,9 @@ export class RidesService {
 
     const previousStatus = ride.status;
     const patch: Partial<Ride> = { status: nextStatus };
+    if (nextStatus === RideStatus.ARRIVING && !ride.arrivedAt) {
+      patch.arrivedAt = new Date();
+    }
     if (nextStatus === RideStatus.IN_PROGRESS && !ride.startedAt) {
       patch.startedAt = new Date();
     }
@@ -1142,21 +1168,42 @@ export class RidesService {
         10,
         Math.round((completedAt.getTime() - startedAtTime) / 1000),
       );
-      const durationMinutes = actualDurationS / 60;
+      const quotedDurationMinutes = Math.max(
+        1,
+        (lockedRide.durationS ?? actualDurationS) / 60,
+      );
+      // Bill travel time from the trip clock within the documented band —
+      // not raw wall-clock, which can explode if End Trip is forgotten.
+      const durationMinutes = this.fareService.settledDurationMinutes(
+        quotedDurationMinutes,
+        lockedRide.startedAt,
+        completedAt,
+      );
+      // Pickup wait (arrive → start), after free grace; never on the quote.
+      const waitMinutes = this.fareService.settledWaitMinutes(
+        lockedRide.arrivedAt,
+        lockedRide.startedAt,
+      );
+
+      const lockedVehicleMultipliers = lockedRide.pricingVersionId
+        ? (
+            await this.pricingVersions
+              .get(lockedRide.pricingVersionId)
+              .catch(() => null)
+          )?.vehicleMultipliers ?? null
+        : null;
 
       const meteredFare = await this.fareService.calculate(
         {
           distanceKm: Math.max(0, billedMeter.distanceM) / 1000,
           durationMinutes,
+          waitMinutes,
           zoneId: zoneIdFor(lockedRide.pickup),
           surgeMultiplier: lockedRide.quotedSurgeMultiplier ?? undefined,
           vehicleType: lockedRide.vehicleType,
+          vehicleMultipliers: lockedVehicleMultipliers,
         },
         lockedRide.quotedFareRates,
-      );
-      const quotedDurationMinutes = Math.max(
-        1,
-        (lockedRide.durationS ?? actualDurationS) / 60,
       );
       const quotedFare = await this.fareService.calculate(
         {
@@ -1165,6 +1212,7 @@ export class RidesService {
           zoneId: zoneIdFor(lockedRide.pickup),
           surgeMultiplier: lockedRide.quotedSurgeMultiplier ?? undefined,
           vehicleType: lockedRide.vehicleType,
+          vehicleMultipliers: lockedVehicleMultipliers,
         },
         lockedRide.quotedFareRates,
       );
@@ -1187,6 +1235,9 @@ export class RidesService {
         billedDistanceM: charged.billedDistanceM,
         quotedFareTotal: charged.quotedFareTotal,
         uncappedFareTotal: charged.uncappedFareTotal,
+        arrivedAt: lockedRide.arrivedAt?.toISOString() ?? null,
+        billedWaitMinutes: waitMinutes,
+        billedDurationMinutes: durationMinutes,
       };
 
       const completed = await em.update(
@@ -1200,7 +1251,10 @@ export class RidesService {
           actualRoute: actualRoute.length > 0 ? actualRoute : null,
           fare: String(farePayload.total),
           fareBreakdown: farePayload as unknown as Record<string, unknown>,
-          pricingVersion: 'v1',
+          pricingVersion:
+            lockedRide.pricingVersion ??
+            lockedRide.pricingVersionId ??
+            'locked',
           settlementStatus: charged.status,
           offerDriverId: null,
           offerExpiresAt: null,
@@ -1657,6 +1711,7 @@ export class RidesService {
     const durationMinutes = ride.durationS
       ? ride.durationS / 60
       : this.fareService.estimateDurationMinutes(distanceKm);
+    const vehicleMultipliers = await this.vehicleMultipliersForRide(ride);
     const fare = await this.fareService.calculate(
       {
         distanceKm,
@@ -1664,6 +1719,7 @@ export class RidesService {
         zoneId: zoneIdFor(ride.pickup),
         surgeMultiplier: ride.quotedSurgeMultiplier ?? undefined,
         vehicleType: ride.vehicleType,
+        vehicleMultipliers,
       },
       ride.quotedFareRates,
     );
@@ -1963,12 +2019,18 @@ export class RidesService {
       dto.durationMinutes,
     );
 
-    const quotedFare = await this.fareService.calculate({
-      distanceKm,
-      durationMinutes,
-      zoneId: zoneIdFor(dto.pickup),
-      vehicleType,
-    });
+    const { rates: lockedRates, version: pricingVersion } =
+      await this.pricingVersions.getActiveRates();
+    const quotedFare = await this.fareService.calculate(
+      {
+        distanceKm,
+        durationMinutes,
+        zoneId: zoneIdFor(dto.pickup),
+        vehicleType,
+        vehicleMultipliers: pricingVersion?.vehicleMultipliers ?? null,
+      },
+      lockedRates,
+    );
 
     const now = new Date();
     let ride: Ride;
@@ -2001,6 +2063,9 @@ export class RidesService {
             durationS: Math.round(durationMinutes * 60),
             quotedSurgeMultiplier: quotedFare.surgeMultiplier,
             quotedFareRates: quotedFare.rates,
+            pricingVersionId: pricingVersion?.id ?? null,
+            pricingVersion:
+              pricingVersion?.versionLabel ?? pricingVersion?.id ?? null,
             status: RideStatus.ACCEPTED,
             requestedAt: now,
             matchedAt: now,
@@ -2095,10 +2160,14 @@ export class RidesService {
 
     await this.consumeStartCode(rideId, startCode);
 
+    const now = new Date();
     if (ride.status === RideStatus.ACCEPTED) {
       await this.rides.update(
         { id: rideId, status: RideStatus.ACCEPTED },
-        { status: RideStatus.ARRIVING },
+        {
+          status: RideStatus.ARRIVING,
+          ...(ride.arrivedAt ? {} : { arrivedAt: now }),
+        },
       );
       await this.logEvent(
         rideId,
@@ -2111,9 +2180,17 @@ export class RidesService {
       ride.status === RideStatus.ACCEPTED
         ? RideStatus.ARRIVING
         : RideStatus.ARRIVING;
+    const startPatch: Partial<Ride> = {
+      status: RideStatus.IN_PROGRESS,
+      startedAt: now,
+    };
+    if (!ride.arrivedAt && ride.status === RideStatus.ARRIVING) {
+      // Already arriving but clock never stamped (legacy rows).
+      startPatch.arrivedAt = now;
+    }
     const moved = await this.rides.update(
       { id: rideId, status: previous },
-      { status: RideStatus.IN_PROGRESS, startedAt: new Date() },
+      startPatch,
     );
     if (!moved.affected) {
       // Race: already started or cancelled.
@@ -2405,6 +2482,7 @@ export class RidesService {
               zoneId: zoneIdFor(ride.pickup),
               surgeMultiplier: ride.quotedSurgeMultiplier ?? undefined,
               vehicleType: ride.vehicleType,
+              vehicleMultipliers: await this.vehicleMultipliersForRide(ride),
             },
             ride.quotedFareRates,
           );

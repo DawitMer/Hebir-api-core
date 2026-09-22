@@ -27,6 +27,11 @@ export interface FareCalculationInput {
   surgeMultiplier?: number;
   /** Requested vehicle class — prices moto below and SUV/XL above sedan. */
   vehicleType?: string | null;
+  /**
+   * Ops-configured multipliers from the active/locked pricing version.
+   * When omitted, built-in defaults apply (moto 0.7, suv/xl 1.5, else 1).
+   */
+  vehicleMultipliers?: Record<string, number> | null;
 }
 
 export interface FareBreakdown {
@@ -142,7 +147,10 @@ export class FareService {
             )
           : 1;
 
-    const vehicleMultiplier = this.vehicleTypeMultiplier(input.vehicleType);
+    const vehicleMultiplier = this.vehicleTypeMultiplier(
+      input.vehicleType,
+      input.vehicleMultipliers,
+    );
     const combinedMultiplier = surgeMultiplier * vehicleMultiplier;
     const total = Math.round(subtotal * combinedMultiplier);
 
@@ -235,13 +243,55 @@ export class FareService {
   }
 
   /**
-   * Relative pricing per vehicle class, mirroring dispatch's capacity bands
-   * (rides.service vehicleMatchesType): moto below sedan, SUV/van/XL above.
-   * The same multiplier is used at quote time and at trip completion so the
-   * rider is charged what they were quoted.
+   * Billable pickup wait = arrive → start, after a short free grace.
+   * Caps so a forgotten Start Trip cannot invent unlimited wait.
    */
-  vehicleTypeMultiplier(vehicleType?: string | null): number {
+  settledWaitMinutes(
+    arrivedAt: Date | null | undefined,
+    startedAt: Date | null | undefined,
+    opts?: { freeMinutes?: number; maxMinutes?: number },
+  ): number {
+    if (!arrivedAt || !startedAt) return 0;
+    const free = Math.max(0, opts?.freeMinutes ?? 2);
+    const max = Math.max(free, opts?.maxMinutes ?? 45);
+    const raw =
+      (new Date(startedAt).getTime() - new Date(arrivedAt).getTime()) / 60_000;
+    if (!Number.isFinite(raw) || raw <= free) return 0;
+    return Math.min(raw - free, max - free);
+  }
+
+  /**
+   * Relative pricing per vehicle class. Prefers ops-configured multipliers from
+   * the locked pricing version; falls back to dispatch capacity bands.
+   */
+  vehicleTypeMultiplier(
+    vehicleType?: string | null,
+    configured?: Record<string, number> | null,
+  ): number {
     const wanted = (vehicleType ?? 'any').toLowerCase().trim();
+    if (configured && Object.keys(configured).length > 0) {
+      const direct = configured[wanted];
+      if (typeof direct === 'number' && Number.isFinite(direct) && direct > 0) {
+        return direct;
+      }
+      for (const [key, value] of Object.entries(configured)) {
+        if (
+          typeof value === 'number' &&
+          Number.isFinite(value) &&
+          value > 0 &&
+          (wanted.includes(key) || key.includes(wanted))
+        ) {
+          return value;
+        }
+      }
+      if (
+        typeof configured.any === 'number' &&
+        Number.isFinite(configured.any) &&
+        configured.any > 0
+      ) {
+        return configured.any;
+      }
+    }
     if (
       wanted.includes('moto') ||
       wanted.includes('motor') ||
@@ -292,6 +342,16 @@ export class FareService {
     zoneId: string,
     maxMultiplier: number,
   ): Promise<number> {
+    // Ops override is authoritative when enabled — never from the client.
+    const override = this.readOpsSurgeOverride(zoneId, maxMultiplier);
+    if (override != null) {
+      this.surgeByZone.set(zoneId, {
+        multiplier: override,
+        expiresAt: Date.now() + this.surgeCacheTtlMs,
+      });
+      return override;
+    }
+
     const cached = this.surgeByZone.get(zoneId);
     if (cached && cached.expiresAt > Date.now()) {
       return Math.min(cached.multiplier, maxMultiplier);
@@ -385,6 +445,50 @@ export class FareService {
       this.logger.warn(
         `Surge lookup failed for zone ${zoneId}: ${(error as Error).message}`,
       );
+      return 1;
+    }
+  }
+
+  /** Drop in-process surge cache after ops changes overrides. */
+  clearSurgeCache() {
+    this.surgeByZone.clear();
+  }
+
+  /**
+   * Backend-only surge override from Neon configuration.
+   * Zone map wins over global. Returns null when demand surge should run.
+   */
+  private readOpsSurgeOverride(
+    zoneId: string,
+    maxMultiplier: number,
+  ): number | null {
+    try {
+      const enabled = this.configuration.get<unknown>('surge_override_enabled');
+      const on =
+        enabled === true || enabled === 'true' || enabled === 1;
+      if (!on) return null;
+    } catch {
+      return null;
+    }
+
+    const max = Math.max(1, maxMultiplier);
+    try {
+      const zones = this.configuration.get<unknown>('surge_zone_overrides');
+      if (zones && typeof zones === 'object' && !Array.isArray(zones)) {
+        const raw = (zones as Record<string, unknown>)[zoneId];
+        const z = Number(raw);
+        if (Number.isFinite(z) && z >= 1) {
+          return Math.min(Math.max(1, z), max);
+        }
+      }
+    } catch {
+      // fall through to global
+    }
+
+    try {
+      const g = this.readNumber('surge_override_multiplier', 1);
+      return Math.min(Math.max(1, g), max);
+    } catch {
       return 1;
     }
   }

@@ -76,6 +76,22 @@ describe('FareService', () => {
     expect(suv.total).toBe(Math.round(sedan.total * 1.5));
   });
 
+  it('prefers ops pricing-version vehicle multipliers over built-ins', async () => {
+    const comfort = await service.calculate({
+      distanceKm: 5,
+      durationMinutes: 18,
+      vehicleType: 'comfort',
+      vehicleMultipliers: { comfort: 1.15, sedan: 1 },
+    });
+    const sedan = await service.calculate({
+      distanceKm: 5,
+      durationMinutes: 18,
+      vehicleType: 'sedan',
+      vehicleMultipliers: { comfort: 1.15, sedan: 1 },
+    });
+    expect(comfort.total).toBe(Math.round(sedan.total * 1.15));
+  });
+
   it('uses urban circuity when the client omits road distance', () => {
     const bole = { lat: 8.9806, lng: 38.7578 };
     const kazanchis = { lat: 9.014, lng: 38.763 };
@@ -110,10 +126,41 @@ describe('FareService', () => {
     ).toBe(18 * 0.9);
   });
 
-  it('exposes the new default rates', () => {
-    expect(service.getRates().initialFeeEtb).toBe(
-      FARE_RATE_DEFAULTS[FareRateKeys.initialFeeEtb],
+  it('bills pickup wait after a 2-minute free grace', () => {
+    const arrived = new Date('2026-08-16T10:00:00Z');
+    const started = new Date('2026-08-16T10:07:00Z');
+    expect(service.settledWaitMinutes(arrived, started)).toBe(5);
+    expect(
+      service.settledWaitMinutes(
+        arrived,
+        new Date('2026-08-16T10:01:30Z'),
+      ),
+    ).toBe(0);
+    expect(service.settledWaitMinutes(null, started)).toBe(0);
+  });
+
+  it('applies backend surge override instead of live demand', async () => {
+    const configMap: Record<string, unknown> = {
+      ...FARE_RATE_DEFAULTS,
+      surge_override_enabled: true,
+      surge_override_multiplier: 1.8,
+      surge_zone_overrides: {},
+    };
+    const overridden = new FareService(
+      {
+        get: (key: string) => {
+          if (!(key in configMap)) throw new Error(`missing ${key}`);
+          return configMap[key];
+        },
+      } as never,
+      { get: () => undefined } as never,
+      { enabled: true, isOpen: false, get: async () => ({ riders: 0, drivers: 5, surgeMultiplier: 1 }) } as never,
     );
-    expect(service.getRates().perMeterEtb).toBe(0.016);
+    const fare = await overridden.calculate({
+      distanceKm: 5,
+      durationMinutes: 15,
+      zoneId: 'zone-a',
+    });
+    expect(fare.surgeMultiplier).toBe(1.8);
   });
 });

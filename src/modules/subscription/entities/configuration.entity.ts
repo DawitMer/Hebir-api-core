@@ -50,6 +50,15 @@ export const CONFIG_DEFAULTS: Record<string, unknown> = {
   surge_max_step_down: 0.3,
   /** Weight of neighboring hex targets when smoothing (0–1). */
   surge_neighbor_blend: 0.35,
+  /**
+   * When true, FareService uses override multipliers instead of live demand.
+   * Rider/Driver apps cannot set this — Operations / configuration only.
+   */
+  surge_override_enabled: false,
+  /** Global forced surge when override is enabled (clamped by max). */
+  surge_override_multiplier: 1,
+  /** Per-zone (H3) forced multipliers: { [zoneId]: number }. */
+  surge_zone_overrides: {},
   // Legacy aliases (read by migration only; prefer fare_initial_fee / per_meter).
   fare_base_etb: 50,
   fare_per_km_etb: 16,
