@@ -62,9 +62,11 @@ import {
   DispatchJob,
   DispatchState,
   MAX_DISPATCH_MS,
+  MAX_RADIUS_KM,
   OFFER_TIMEOUT_MS,
   RADIUS_EXPAND_KM,
   DISPATCH_POLL_MS,
+  shouldEndEmptySearch,
 } from './dispatch/dispatch.types';
 import { DispatchQueueService } from './dispatch/dispatch.queue.service';
 import { LocationSvcClient } from '../../common/location-svc/location-svc.client';
@@ -490,8 +492,19 @@ export class RidesService {
       return;
     }
 
-    // No offer this tick — expand and retry after a short delay.
-    radiusKm += RADIUS_EXPAND_KM;
+    // No offer this tick — expand gradually, or end the attempt at the cap
+    // so the rider sees Retry instead of waiting the full 6 minutes in an
+    // empty city / exhausted local pool.
+    if (shouldEndEmptySearch(radiusKm)) {
+      this.logger.log(
+        `Dispatch ${rideId}: no eligible drivers at max radius ${MAX_RADIUS_KM}km — unmatched`,
+      );
+      await this.markUnmatched(rideId);
+      await this.dispatchQueue.clearState(rideId);
+      return;
+    }
+
+    radiusKm = Math.min(radiusKm + RADIUS_EXPAND_KM, MAX_RADIUS_KM);
     const state: DispatchState = {
       startedAt: job.startedAt,
       radiusKm,
@@ -501,6 +514,8 @@ export class RidesService {
     this.logger.log(
       `Dispatch ${rideId}: no eligible drivers, expanding radius to ${radiusKm}km`,
     );
+    // Keep live demand fresh while the rider is still searching (5 min TTL).
+    this.recordOnDemandRequest(ride.pickup, ride.riderId);
     await this.dispatchQueue.enqueueContinue(rideId, DISPATCH_POLL_MS);
   }
 
@@ -666,6 +681,12 @@ export class RidesService {
     const searching = await this.rides.findOne({ where: { id: rideId } });
     if (searching?.status === RideStatus.SEARCHING) {
       await this.notify(searching.riderId, 'ride.status_changed', {
+        rideId,
+        status: RideStatus.SEARCHING,
+        reason: outcome,
+      });
+      // Tell the timed-out driver to drop the offer sheet immediately.
+      await this.notify(driverId, 'ride.status_changed', {
         rideId,
         status: RideStatus.SEARCHING,
         reason: outcome,
@@ -2611,14 +2632,39 @@ export class RidesService {
       });
   }
 
-  /** Drop rider from live demand when the request leaves the marketplace. */
+  /**
+   * Drop rider from live demand when their marketplace search ends.
+   * Skips release when another SEARCHING/OFFERED ride already exists for the
+   * same rider (Retry can race a late unmatched release).
+   */
   private releaseOnDemandRequest(riderId: string): void {
     if (!this.locationSvc.enabled || this.locationSvc.isOpen) return;
-    void this.locationSvc
-      .post('/demand/release', { riderId }, 1000)
-      .catch((error: Error) => {
-        this.logger.warn(`on-demand demand release failed: ${error.message}`);
-      });
+    void (async () => {
+      try {
+        const stillSearching = await this.rides.findOne({
+          where: {
+            riderId,
+            status: In([
+              RideStatus.REQUESTED,
+              RideStatus.SEARCHING,
+              RideStatus.OFFERED,
+            ]),
+          },
+          select: { id: true },
+        });
+        if (stillSearching) {
+          this.logger.log(
+            `Demand release skipped for ${riderId}: ride ${stillSearching.id} still active`,
+          );
+          return;
+        }
+        await this.locationSvc.post('/demand/release', { riderId }, 1000);
+      } catch (error) {
+        this.logger.warn(
+          `on-demand demand release failed: ${(error as Error).message}`,
+        );
+      }
+    })();
   }
 
   /**

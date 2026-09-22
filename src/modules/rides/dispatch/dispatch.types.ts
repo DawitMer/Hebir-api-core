@@ -1,6 +1,11 @@
 /** Expanding-radius on-demand dispatch (resumable Redis queue). */
 export const INITIAL_RADIUS_KM = 1.5;
 export const RADIUS_EXPAND_KM = 1.5;
+/**
+ * Cap so an empty city does not search the whole country. After this radius
+ * with no eligible drivers, the attempt ends as unmatched and the rider can Retry.
+ */
+export const MAX_RADIUS_KM = 8;
 /** Overall search budget — long enough for a few 2-minute offers. */
 export const MAX_DISPATCH_MS = 6 * 60_000;
 /** How long a driver has to accept/decline a live offer. */
@@ -39,3 +44,8 @@ export type DispatchState = {
   radiusKm: number;
   triedDriverIds: string[];
 };
+
+/** Whether an empty-radius tick should end the attempt instead of expanding. */
+export function shouldEndEmptySearch(radiusKm: number): boolean {
+  return radiusKm >= MAX_RADIUS_KM - 1e-9;
+}
