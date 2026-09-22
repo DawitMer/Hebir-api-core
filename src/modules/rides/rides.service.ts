@@ -312,6 +312,8 @@ export class RidesService {
     const { pickupAddress, dropoffAddress } =
       await this.geocoding.reverseGeocodePair(dto.pickup, dto.dropoff);
 
+    const waypoints = this.normalizeWaypoints(dto.waypoints);
+
     const vehicleType = normalizeRideVehicleType(dto.vehicleType);
     const { distanceKm, durationMinutes } = this.fareService.quotedTripMetrics(
       dto.pickup,
@@ -342,6 +344,7 @@ export class RidesService {
           riderId,
           pickup: dto.pickup,
           dropoff: dto.dropoff,
+          waypoints: waypoints.length > 0 ? waypoints : null,
           pickupAddress: pickupAddress || dto.pickupAddress || null,
           dropoffAddress: dropoffAddress || dto.dropoffAddress || null,
           vehicleType,
@@ -1728,6 +1731,7 @@ export class RidesService {
       id: ride.id,
       pickup: ride.pickup,
       dropoff: ride.dropoff,
+      waypoints: ride.waypoints ?? [],
       pickupAddress: ride.pickupAddress,
       dropoffAddress: ride.dropoffAddress,
       vehicleType: ride.vehicleType,
@@ -1736,6 +1740,34 @@ export class RidesService {
       durationMinutes: Math.round(durationMinutes * 10) / 10,
       estimatedFare: this.fareQuotePayload(fare),
     };
+  }
+
+  /** Sanitize client waypoints: max 3, finite coords, stable sequence. */
+  private normalizeWaypoints(
+    raw:
+      | Array<{ lat: number; lng: number; address?: string; sequence?: number }>
+      | undefined,
+  ): Array<{ lat: number; lng: number; address: string | null; sequence: number }> {
+    if (!raw?.length) return [];
+    const out: Array<{
+      lat: number;
+      lng: number;
+      address: string | null;
+      sequence: number;
+    }> = [];
+    for (const point of raw.slice(0, 3)) {
+      const lat = Number(point.lat);
+      const lng = Number(point.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      if (lat < -90 || lat > 90 || lng < -180 || lng > 180) continue;
+      out.push({
+        lat,
+        lng,
+        address: point.address?.trim().slice(0, 240) || null,
+        sequence: out.length,
+      });
+    }
+    return out;
   }
 
   private fareQuotePayload(fare: FareBreakdown): FareQuotePayload {

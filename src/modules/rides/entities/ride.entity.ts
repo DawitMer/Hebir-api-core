@@ -55,6 +55,18 @@ export class Ride {
   @Column({ type: 'jsonb' })
   dropoff: GeoPoint;
 
+  /**
+   * Ordered intermediate stops between pickup and dropoff.
+   * Empty/null = direct trip. Each entry: { lat, lng, address?, sequence }.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  waypoints: Array<{
+    lat: number;
+    lng: number;
+    address?: string | null;
+    sequence: number;
+  }> | null;
+
   @Column({ nullable: true })
   pickupAddress: string | null;
 

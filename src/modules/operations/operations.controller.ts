@@ -181,13 +181,13 @@ export class OperationsController {
   }
 
   @Get('surge')
-  @RequirePermissions('pricing.view')
+  @RequirePermissions('pricing.view', 'rides.view', 'rides.manage')
   getSurge() {
     return this.surge.getState();
   }
 
   @Patch('surge')
-  @RequirePermissions('pricing.edit', 'pricing.publish')
+  @RequirePermissions('pricing.edit', 'pricing.publish', 'rides.manage')
   updateSurge(
     @CurrentUser() user: { userId: string },
     @Body() dto: UpdateSurgeDto,

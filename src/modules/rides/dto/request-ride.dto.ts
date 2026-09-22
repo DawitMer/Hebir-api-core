@@ -1,5 +1,7 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsIn,
   IsLatitude,
   IsLongitude,
@@ -32,6 +34,25 @@ class GeoPointDto {
   lng: number;
 }
 
+class RideWaypointDto {
+  @IsNumber()
+  @IsLatitude()
+  lat: number;
+
+  @IsNumber()
+  @IsLongitude()
+  lng: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(240)
+  address?: string;
+
+  @IsOptional()
+  @IsNumber()
+  sequence?: number;
+}
+
 export class RequestRideDto {
   @IsObject()
   @ValidateNested()
@@ -42,6 +63,14 @@ export class RequestRideDto {
   @ValidateNested()
   @Type(() => GeoPointDto)
   dropoff: GeoPointDto;
+
+  /** Intermediate stops (pickup → stops → dropoff). Max 3. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(3)
+  @ValidateNested({ each: true })
+  @Type(() => RideWaypointDto)
+  waypoints?: RideWaypointDto[];
 
   @IsOptional()
   @IsString()
@@ -57,7 +86,7 @@ export class RequestRideDto {
   @IsIn([...RIDE_VEHICLE_TYPES])
   vehicleType?: string;
 
-  /** Road distance the rider was quoted on (OSRM). Preferred over haversine. */
+  /** Road distance the rider was quoted on (OSRM through stops). Preferred over haversine. */
   @IsOptional()
   @IsNumber()
   distanceKm?: number;
