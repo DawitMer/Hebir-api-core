@@ -64,6 +64,7 @@
     "class-validator": "^0.15.1",
     "compression": "^1.8.1",
     "firebase-admin": "^14.3.0",
+    "h3-js": "^4.5.0",
     "helmet": "^8.3.0",
     "ioredis": "^5.11.1",
     "nestjs-pino": "^5.2.0",
@@ -124,11 +125,24 @@
       "ts"
     ],
     "rootDir": "src",
-    "setupFilesAfterEnv": ["<rootDir>/test-setup.ts"],
+    "setupFilesAfterEnv": [
+      "<rootDir>/test-setup.ts"
+    ],
     "testRegex": ".*\\.spec\\.ts$",
-    "extensionsToTreatAsEsm": [".ts"],
+    "extensionsToTreatAsEsm": [
+      ".ts"
+    ],
     "transform": {
-      "^.+\\.ts$": ["ts-jest", { "useESM": true, "tsconfig": { "module": "ES2022", "moduleResolution": "node" } }]
+      "^.+\\.ts$": [
+        "ts-jest",
+        {
+          "useESM": true,
+          "tsconfig": {
+            "module": "ES2022",
+            "moduleResolution": "node"
+          }
+        }
+      ]
     },
     "collectCoverageFrom": [
       "**/*.(t|j)s"

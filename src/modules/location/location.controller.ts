@@ -39,6 +39,7 @@ import { liveTrackFromRide, writeLiveTrack } from '../rides/ride-live-track';
 import { remainingEta } from '../rides/remaining-eta';
 import { GeocodingService } from '../../common/geocoding/geocoding.service';
 import { TripRouteRecorderService } from '../rides/trip-route-recorder.service';
+import { zoneBoundary, zoneIdFor } from '../matching/geo/geo.util';
 
 const TRACKABLE_RIDE_STATUSES = [
   RideStatus.MATCHED,
@@ -165,6 +166,10 @@ export class LocationController {
               heading: body.heading,
               speed: body.speed,
               accuracy: body.accuracy,
+              // Only ONLINE (+ subscribed) drivers count as surge supply.
+              // ON_TRIP / RESERVED stay in geo for the rider map but are busy.
+              available: status === DriverStatus.ONLINE && subscribed,
+              zoneId: zoneIdFor({ lat: body.lat, lng: body.lng }),
             },
           );
           geoAccepted = ping?.accepted !== false;
@@ -366,8 +371,27 @@ export class LocationController {
     }
     if (this.locationSvc.enabled && !this.locationSvc.isOpen) {
       try {
-        const res = await this.locationSvc.get('/demand/grid', bbox, 2500);
-        if (res) return res;
+        const res = await this.locationSvc.get<{
+          cells?: Array<Record<string, unknown>>;
+        }>('/demand/grid', bbox, 2500);
+        if (res?.cells) {
+          // Prefer exact H3 boundaries from h3-js so Driver/Rider polygons match.
+          return {
+            cells: res.cells
+              .filter((c) => Number(c.riders) > 0)
+              .map((c) => {
+                const zoneId = String(c.zoneId ?? '');
+                const h3Boundary = zoneId ? zoneBoundary(zoneId) : [];
+                return {
+                  ...c,
+                  boundary:
+                    h3Boundary.length >= 6
+                      ? h3Boundary
+                      : (c.boundary ?? h3Boundary),
+                };
+              }),
+          };
+        }
       } catch {
         // Fall back to empty cells if location-svc is unavailable
       }

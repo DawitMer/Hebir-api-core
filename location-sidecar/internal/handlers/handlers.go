@@ -82,6 +82,10 @@ type driverLocationRequest struct {
 	Heading  *float64  `json:"heading"`
 	Speed    *float64  `json:"speed"`
 	Accuracy *float64  `json:"accuracy"`
+	// Available=true → online idle supply. false → on_trip/reserved (busy).
+	// Omitted/nil defaults to available for backward-compatible GPS pings.
+	Available *bool  `json:"available"`
+	ZoneID    string `json:"zoneId"`
 }
 
 // UpdateDriverLocation handles POST /drivers/location — the GPS ping
@@ -115,12 +119,26 @@ func (h *Handlers) UpdateDriverLocation(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if result.Accepted {
-		if err := h.Demand.RecordDriverAvailable(
-			r.Context(),
-			zoneIDFor(req.Location),
-			req.DriverID,
-		); err != nil {
-			log.Printf("RecordDriverAvailable failed: %v", err)
+		zoneID := req.ZoneID
+		if zoneID == "" {
+			zoneID = zoneIDFor(req.Location)
+		}
+		available := true
+		if req.Available != nil {
+			available = *req.Available
+		}
+		var err error
+		if available {
+			err = h.Demand.RecordDriverAvailable(
+				r.Context(), zoneID, req.DriverID, req.Location.Lat, req.Location.Lng,
+			)
+		} else {
+			err = h.Demand.RecordDriverBusy(
+				r.Context(), zoneID, req.DriverID, req.Location.Lat, req.Location.Lng,
+			)
+		}
+		if err != nil {
+			log.Printf("demand driver update failed: %v", err)
 		}
 	}
 
@@ -148,11 +166,13 @@ func (h *Handlers) GetDriverPoint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, loc)
 }
 
-// RecordRiderDemand handles POST /demand/request — on-demand ride create
-// (shared trips already record demand inside CorridorSearch).
+// RecordRiderDemand handles POST /demand/request — on-demand ride create only.
+// Requires riderId so refreshes by the same rider cannot inflate surge.
 func (h *Handlers) RecordRiderDemand(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Location geo.Point `json:"location"`
+		RiderID  string    `json:"riderId"`
+		ZoneID   string    `json:"zoneId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -162,9 +182,40 @@ func (h *Handlers) RecordRiderDemand(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, geo.ErrInvalidPoint.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := h.Demand.RecordRiderRequest(r.Context(), zoneIDFor(req.Location)); err != nil {
-		log.Printf("RecordRiderRequest failed: %v", err)
+	if req.RiderID == "" {
+		http.Error(w, "riderId is required", http.StatusBadRequest)
+		return
+	}
+	zoneID := req.ZoneID
+	if zoneID == "" {
+		zoneID = zoneIDFor(req.Location)
+	}
+	if err := h.Demand.RecordRiderActive(
+		r.Context(), zoneID, req.RiderID, req.Location.Lat, req.Location.Lng,
+	); err != nil {
+		log.Printf("RecordRiderActive failed: %v", err)
 		http.Error(w, "failed to record demand", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ReleaseRiderDemand handles POST /demand/release — cancel / match / complete.
+func (h *Handlers) ReleaseRiderDemand(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RiderID string `json:"riderId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.RiderID == "" {
+		http.Error(w, "riderId is required", http.StatusBadRequest)
+		return
+	}
+	if err := h.Demand.ReleaseRider(r.Context(), req.RiderID); err != nil {
+		log.Printf("ReleaseRider failed: %v", err)
+		http.Error(w, "failed to release demand", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -223,8 +274,8 @@ type corridorSearchResponse struct {
 }
 
 // CorridorSearch handles POST /corridor-search — Layer 2 of the matching
-// pipeline (blueprint 6.7). Also records a demand signal for the pickup
-// zone so the fare module can compute surge.
+// pipeline (blueprint 6.7). Does NOT record surge demand: browse/match polls
+// must not fabricate marketplace shortage.
 func (h *Handlers) CorridorSearch(w http.ResponseWriter, r *http.Request) {
 	var req corridorSearchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -244,27 +295,19 @@ func (h *Handlers) CorridorSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.Demand.RecordRiderRequest(r.Context(), zoneIDFor(req.Pickup)); err != nil {
-		log.Printf("RecordRiderRequest failed: %v", err)
-	}
-
 	writeJSON(w, corridorSearchResponse{TripIDs: tripIDs})
 }
 
-type demandResponse struct {
-	DemandRatio float64 `json:"demandRatio"`
-}
-
 // ZoneDemand handles GET /zones/{zoneId}/demand, used by api-core's fare
-// module to compute the surge multiplier.
+// module to compute the surge multiplier from live hex counts.
 func (h *Handlers) ZoneDemand(w http.ResponseWriter, r *http.Request, zoneID string) {
-	ratio, err := h.Demand.DemandRatio(r.Context(), zoneID)
+	snap, err := h.Demand.ZoneSnapshot(r.Context(), zoneID)
 	if err != nil {
-		log.Printf("DemandRatio failed for zone %s: %v", zoneID, err)
+		log.Printf("ZoneSnapshot failed for zone %s: %v", zoneID, err)
 		http.Error(w, "failed to compute demand", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, demandResponse{DemandRatio: ratio})
+	writeJSON(w, snap)
 }
 
 type demandGridResponse struct {
@@ -360,16 +403,10 @@ func (h *Handlers) ListDriverLocations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"drivers": locations, "limit": limit})
 }
 
-// zoneIDFor buckets a point into a coarse grid cell. Good enough as a
-// zone identifier for demand tracking without a dedicated zones table.
-// Floor (not truncation) so this agrees with api-core's zoneIdFor for
-// negative coordinates — the two must produce identical ids or surge is
-// looked up from a zone nobody is recording demand into.
+// zoneIDFor is a legacy square-grid fallback. Callers should send the Uber H3
+// zoneId from api-core (h3-js, resolution demand.H3Resolution).
 func zoneIDFor(p geo.Point) string {
-	const cellSizeDegrees = demand.CellSizeDegrees // roughly 2km at the equator
-	latCell := int(math.Floor(p.Lat / cellSizeDegrees))
-	lngCell := int(math.Floor(p.Lng / cellSizeDegrees))
-	return "z:" + strconv.Itoa(latCell) + ":" + strconv.Itoa(lngCell)
+	return demand.ZoneIDFor(p.Lat, p.Lng)
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {

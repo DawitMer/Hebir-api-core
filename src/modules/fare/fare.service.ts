@@ -10,6 +10,7 @@ import {
   ADDIS_AVERAGE_SPEED_KMH,
   URBAN_ROAD_CIRCUITY,
 } from './fare-rates';
+import { computeLiveSurge, DEFAULT_SURGE_CONFIG } from './surge.math';
 import { haversineKm, type GeoPoint } from '../matching/geo/geo.util';
 
 export interface FareCalculationInput {
@@ -298,21 +299,83 @@ export class FareService {
 
     if (!this.locationSvc.enabled || this.locationSvc.isOpen) return 1;
     try {
-      const data = await this.locationSvc.get<{ demandRatio: number }>(
-        `/zones/${zoneId}/demand`,
-        undefined,
-        500,
-      );
-      // A non-numeric body would otherwise propagate NaN all the way into the
-      // charged total.
-      const ratio = Number(data?.demandRatio);
-      if (!Number.isFinite(ratio)) {
-        this.logger.warn(
-          `Surge lookup for zone ${zoneId} returned a non-numeric ratio; using 1.0`,
-        );
+      const data = await this.locationSvc.get<{
+        demandRatio?: number;
+        riders?: number;
+        drivers?: number;
+        surgeMultiplier?: number;
+      }>(`/zones/${zoneId}/demand`, undefined, 500);
+
+      const riders = Number(data?.riders);
+      const drivers = Number(data?.drivers);
+      const hasCounts = Number.isFinite(riders) && Number.isFinite(drivers);
+
+      // Hard rule first: no live riders ⇒ no surge (ignore stale smoothed values).
+      if (hasCounts && riders <= 0) {
+        this.surgeByZone.set(zoneId, {
+          multiplier: 1,
+          expiresAt: Date.now() + this.surgeCacheTtlMs,
+        });
         return 1;
       }
-      const multiplier = 1 + Math.max(0, ratio - 1);
+
+      // Prefer location-svc's already-smoothed hex multiplier (neighbor blend +
+      // step caps applied once). Re-applying Nest step caps would slow climb.
+      const serverSurge = Number(data?.surgeMultiplier);
+      if (Number.isFinite(serverSurge) && serverSurge >= 1) {
+        const multiplier = Math.min(Math.max(1, serverSurge), maxMultiplier);
+        this.surgeByZone.set(zoneId, {
+          multiplier,
+          expiresAt: Date.now() + this.surgeCacheTtlMs,
+        });
+        return multiplier;
+      }
+
+      const previous = cached?.multiplier ?? 1;
+      const result = hasCounts
+        ? computeLiveSurge({
+            activeRiders: riders,
+            availableDrivers: drivers,
+            previousMultiplier: previous,
+            config: {
+              maxMultiplier,
+              minActiveRiders: this.readNumber(
+                'surge_min_active_riders',
+                DEFAULT_SURGE_CONFIG.minActiveRiders,
+              ),
+              maxStepUp: this.readNumber(
+                'surge_max_step_up',
+                DEFAULT_SURGE_CONFIG.maxStepUp,
+              ),
+              maxStepDown: this.readNumber(
+                'surge_max_step_down',
+                DEFAULT_SURGE_CONFIG.maxStepDown,
+              ),
+              neighborBlend: this.readNumber(
+                'surge_neighbor_blend',
+                DEFAULT_SURGE_CONFIG.neighborBlend,
+              ),
+            },
+          })
+        : null;
+
+      let multiplier = result?.multiplier ?? 1;
+      if (!result) {
+        const ratio = Number(data?.demandRatio);
+        if (!Number.isFinite(ratio) || ratio <= 0) {
+          this.logger.warn(
+            `Surge lookup for zone ${zoneId} returned no counts; using 1.0`,
+          );
+          return 1;
+        }
+        multiplier = computeLiveSurge({
+          activeRiders: Math.max(2, Math.ceil(ratio)),
+          availableDrivers: 1,
+          previousMultiplier: previous,
+          config: { maxMultiplier },
+        }).multiplier;
+      }
+
       this.surgeByZone.set(zoneId, {
         multiplier,
         expiresAt: Date.now() + this.surgeCacheTtlMs,

@@ -2,29 +2,71 @@
  * Pure geo helpers for matching / surge zoning.
  * Keep algorithm math here — services only orchestrate I/O.
  */
+import { cellToBoundary, cellToLatLng, latLngToCell } from 'h3-js';
+
 export type GeoPoint = { lat: number; lng: number };
 
 export const EARTH_RADIUS_KM = 6371;
 
-/** ~2 km cells — must match location-svc handlers.zoneIDFor */
+/**
+ * Uber H3 resolution for marketplace surge hexes.
+ * Res 8 ≈ 0.46 km edge (~0.74 km²) — hyperlocal, not city-wide.
+ * Must match location-svc demand.H3Resolution.
+ */
+export const H3_SURGE_RESOLUTION = 8;
+
+/** @deprecated Square grid — kept for reading legacy Redis keys during cutover. */
 export const ZONE_CELL_SIZE_DEGREES = 0.02;
 
-export function zoneIdFor(point: GeoPoint): string {
-  const latCell = Math.floor(point.lat / ZONE_CELL_SIZE_DEGREES);
-  const lngCell = Math.floor(point.lng / ZONE_CELL_SIZE_DEGREES);
-  return `z:${latCell}:${lngCell}`;
+/** H3 cell id used as the surge / demand zone key. */
+export function zoneIdFor(
+  point: GeoPoint,
+  resolution: number = H3_SURGE_RESOLUTION,
+): string {
+  return latLngToCell(point.lat, point.lng, resolution);
 }
 
 export function zoneCenter(zoneId: string): GeoPoint | null {
-  const parts = zoneId.split(':');
-  if (parts.length !== 3 || parts[0] !== 'z') return null;
-  const latCell = Number(parts[1]);
-  const lngCell = Number(parts[2]);
-  if (!Number.isFinite(latCell) || !Number.isFinite(lngCell)) return null;
-  return {
-    lat: (latCell + 0.5) * ZONE_CELL_SIZE_DEGREES,
-    lng: (lngCell + 0.5) * ZONE_CELL_SIZE_DEGREES,
-  };
+  if (zoneId.startsWith('z:')) {
+    const parts = zoneId.split(':');
+    if (parts.length !== 3) return null;
+    const latCell = Number(parts[1]);
+    const lngCell = Number(parts[2]);
+    if (!Number.isFinite(latCell) || !Number.isFinite(lngCell)) return null;
+    return {
+      lat: (latCell + 0.5) * ZONE_CELL_SIZE_DEGREES,
+      lng: (lngCell + 0.5) * ZONE_CELL_SIZE_DEGREES,
+    };
+  }
+  try {
+      const { lat, lng } = (() => {
+        const pair = cellToLatLng(zoneId);
+        return { lat: pair[0], lng: pair[1] };
+      })();
+      return { lat, lng };
+    } catch {
+      return null;
+    }
+}
+
+/** Outer ring of the H3 hex as lat/lng vertices (for map polygons). */
+export function zoneBoundary(zoneId: string): GeoPoint[] {
+  if (zoneId.startsWith('z:')) {
+    const c = zoneCenter(zoneId);
+    if (!c) return [];
+    const half = ZONE_CELL_SIZE_DEGREES / 2;
+    return [
+      { lat: c.lat - half, lng: c.lng - half },
+      { lat: c.lat - half, lng: c.lng + half },
+      { lat: c.lat + half, lng: c.lng + half },
+      { lat: c.lat + half, lng: c.lng - half },
+    ];
+  }
+  try {
+    return cellToBoundary(zoneId).map(([lat, lng]) => ({ lat, lng }));
+  } catch {
+    return [];
+  }
 }
 
 export function haversineKm(a: GeoPoint, b: GeoPoint): number {

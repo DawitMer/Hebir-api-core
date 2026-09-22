@@ -63,6 +63,7 @@ func main() {
 	mux.HandleFunc("GET /drivers/locations", h.ListDriverLocations)
 	mux.HandleFunc("GET /drivers/point/{driverId}", h.GetDriverPoint)
 	mux.HandleFunc("POST /demand/request", limit(writeLimit(h.RecordRiderDemand)))
+	mux.HandleFunc("POST /demand/release", limit(writeLimit(h.ReleaseRiderDemand)))
 	mux.HandleFunc("GET /demand/grid", h.DemandGrid)
 	mux.HandleFunc("/zones/", func(w http.ResponseWriter, r *http.Request) {
 		// Expects /zones/{zoneId}/demand

@@ -341,7 +341,7 @@ export class RidesService {
       'Ride requested; dispatch starting',
     );
     this.logger.log(`Ride ${ride.id}: requested by rider ${riderId}`);
-    this.recordOnDemandRequest(dto.pickup);
+    this.recordOnDemandRequest(dto.pickup, riderId);
 
     try {
       await this.dispatchQueue.enqueueDispatch(ride.id);
@@ -755,6 +755,7 @@ export class RidesService {
     }
     await this.invalidateDriverStatusCache(driverId);
     await this.dispatchQueue.clearState(rideId);
+    this.releaseOnDemandRequest(ride.riderId);
 
     // Refresh both addresses at acceptance so the confirmed ride carries a
     // current, coordinate-accurate pickup for the driver to navigate to.
@@ -1380,6 +1381,7 @@ export class RidesService {
     await this.notify(driverId, 'ride.completed', completionPayload);
     await this.routeRecorder.clearRoute(rideId);
     await this.invalidateDriverStatusCache(driverId);
+    this.releaseOnDemandRequest(ride.riderId);
     await clearLiveTrack(this.redis, driverId, rideId).catch((error: Error) => {
       this.logger.warn(
         `Ride ${rideId} settled; live-track cleanup failed: ${error.message}`,
@@ -1494,6 +1496,8 @@ export class RidesService {
       await this.notify(counterpartId, 'ride.cancelled', { rideId, reason });
     }
 
+    this.releaseOnDemandRequest(ride.riderId);
+
     this.logger.log(`Ride ${rideId}: cancelled by ${actorId}`);
     return (await this.rides.findOne({ where: { id: rideId } })) ?? ride;
   }
@@ -1576,6 +1580,8 @@ export class RidesService {
       rideId,
       status: RideStatus.SEARCHING,
     });
+    // Rider is searching again — restore live demand in the pickup hex.
+    this.recordOnDemandRequest(ride.pickup, ride.riderId);
 
     this.logger.log(
       `Ride ${rideId}: rematching after driver ${driverId} cancelled`,
@@ -2510,6 +2516,7 @@ export class RidesService {
 
     await this.notify(ride.riderId, 'ride.unmatched', { rideId });
     await this.dispatchQueue.clearState(rideId);
+    this.releaseOnDemandRequest(ride.riderId);
     this.logger.warn(
       `Ride ${rideId}: unmatched — dispatch window elapsed with no driver`,
     );
@@ -2543,13 +2550,31 @@ export class RidesService {
     }
   }
 
-  /** On-demand surge uses the same zone demand as shared matching. */
-  private recordOnDemandRequest(pickup: GeoPoint): void {
+  /** On-demand surge: distinct rider in the pickup H3 hex while searching. */
+  private recordOnDemandRequest(pickup: GeoPoint, riderId: string): void {
     if (!this.locationSvc.enabled || this.locationSvc.isOpen) return;
     void this.locationSvc
-      .post('/demand/request', { location: pickup }, 1000)
+      .post(
+        '/demand/request',
+        {
+          location: pickup,
+          riderId,
+          zoneId: zoneIdFor(pickup),
+        },
+        1000,
+      )
       .catch((error: Error) => {
         this.logger.warn(`on-demand demand signal failed: ${error.message}`);
+      });
+  }
+
+  /** Drop rider from live demand when the request leaves the marketplace. */
+  private releaseOnDemandRequest(riderId: string): void {
+    if (!this.locationSvc.enabled || this.locationSvc.isOpen) return;
+    void this.locationSvc
+      .post('/demand/release', { riderId }, 1000)
+      .catch((error: Error) => {
+        this.logger.warn(`on-demand demand release failed: ${error.message}`);
       });
   }
 

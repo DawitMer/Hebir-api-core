@@ -42,6 +42,14 @@ export const CONFIG_DEFAULTS: Record<string, unknown> = {
   fare_per_wait_minute_etb: 2,
   fare_minimum_etb: 70,
   surge_max_multiplier: 2.5,
+  /** Distinct active riders required in an H3 hex before surge can engage. */
+  surge_min_active_riders: 2,
+  /** Max surge increase per resolve (smooths spikes). */
+  surge_max_step_up: 0.2,
+  /** Max surge decrease per resolve. */
+  surge_max_step_down: 0.3,
+  /** Weight of neighboring hex targets when smoothing (0–1). */
+  surge_neighbor_blend: 0.35,
   // Legacy aliases (read by migration only; prefer fare_initial_fee / per_meter).
   fare_base_etb: 50,
   fare_per_km_etb: 16,
