@@ -51,14 +51,16 @@ export const CONFIG_DEFAULTS: Record<string, unknown> = {
   /** Weight of neighboring hex targets when smoothing (0–1). */
   surge_neighbor_blend: 0.35,
   /**
-   * When true, FareService uses override multipliers instead of live demand.
+   * When true, FareService may apply ops overrides (named Addis zones / hex map).
    * Rider/Driver apps cannot set this — Operations / configuration only.
    */
   surge_override_enabled: false,
-  /** Global forced surge when override is enabled (clamped by max). */
+  /** Legacy city-wide force — prefer surge_named_zone_overrides. */
   surge_override_multiplier: 1,
-  /** Per-zone (H3) forced multipliers: { [zoneId]: number }. */
+  /** Per-hex (H3) forced multipliers expanded from named zones. */
   surge_zone_overrides: {},
+  /** Named Addis market zones (Bole, Merkato, …) → multiplier. */
+  surge_named_zone_overrides: {},
   // Legacy aliases (read by migration only; prefer fare_initial_fee / per_meter).
   fare_base_etb: 50,
   fare_per_km_etb: 16,

@@ -474,12 +474,29 @@ export class FareService {
     const max = Math.max(1, maxMultiplier);
     try {
       const zones = this.configuration.get<unknown>('surge_zone_overrides');
-      if (zones && typeof zones === 'object' && !Array.isArray(zones)) {
-        const raw = (zones as Record<string, unknown>)[zoneId];
-        const z = Number(raw);
-        if (Number.isFinite(z) && z >= 1) {
-          return Math.min(Math.max(1, z), max);
-        }
+      const zoneMap =
+        zones && typeof zones === 'object' && !Array.isArray(zones)
+          ? (zones as Record<string, unknown>)
+          : {};
+      const raw = zoneMap[zoneId];
+      const z = Number(raw);
+      if (Number.isFinite(z) && z >= 1) {
+        return Math.min(Math.max(1, z), max);
+      }
+
+      // Named / hex map active → unlisted hexes follow live demand (not city-wide).
+      const named = this.configuration.get<unknown>(
+        'surge_named_zone_overrides',
+      );
+      const namedActive =
+        named &&
+        typeof named === 'object' &&
+        !Array.isArray(named) &&
+        Object.values(named as Record<string, unknown>).some(
+          (v) => Number(v) > 1.001,
+        );
+      if (namedActive || Object.keys(zoneMap).length > 0) {
+        return null;
       }
     } catch {
       // fall through to global
@@ -487,9 +504,10 @@ export class FareService {
 
     try {
       const g = this.readNumber('surge_override_multiplier', 1);
+      if (!Number.isFinite(g) || g <= 1.001) return null;
       return Math.min(Math.max(1, g), max);
     } catch {
-      return 1;
+      return null;
     }
   }
 }

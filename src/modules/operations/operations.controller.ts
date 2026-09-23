@@ -73,6 +73,7 @@ class UpdateSurgeDto {
   @IsOptional() @IsBoolean() overrideEnabled?: boolean;
   @IsOptional() @IsNumber() @Min(1) overrideMultiplier?: number;
   @IsOptional() @IsObject() zoneOverrides?: Record<string, number>;
+  @IsOptional() @IsObject() namedZoneOverrides?: Record<string, number>;
   @IsOptional() @IsBoolean() clearZoneOverrides?: boolean;
   @IsOptional() @IsNumber() @Min(1) maxMultiplier?: number;
   @IsOptional() @IsNumber() @Min(0) minActiveRiders?: number;

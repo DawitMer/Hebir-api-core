@@ -145,6 +145,7 @@ describe('FareService', () => {
       surge_override_enabled: true,
       surge_override_multiplier: 1.8,
       surge_zone_overrides: {},
+      surge_named_zone_overrides: {},
     };
     const overridden = new FareService(
       {
@@ -162,5 +163,43 @@ describe('FareService', () => {
       zoneId: 'zone-a',
     });
     expect(fare.surgeMultiplier).toBe(1.8);
+  });
+
+  it('named zone map does not force unlisted hexes city-wide', async () => {
+    const configMap: Record<string, unknown> = {
+      ...FARE_RATE_DEFAULTS,
+      surge_override_enabled: true,
+      surge_override_multiplier: 2.5,
+      surge_named_zone_overrides: { bole: 1.5 },
+      surge_zone_overrides: { 'hex-bole-1': 1.5 },
+    };
+    const service = new FareService(
+      {
+        get: (key: string) => {
+          if (!(key in configMap)) throw new Error(`missing ${key}`);
+          return configMap[key];
+        },
+      } as never,
+      { get: () => undefined } as never,
+      {
+        enabled: true,
+        isOpen: false,
+        get: async () => ({ riders: 8, drivers: 2, surgeMultiplier: 1.3 }),
+      } as never,
+    );
+    const forced = await service.calculate({
+      distanceKm: 5,
+      durationMinutes: 15,
+      zoneId: 'hex-bole-1',
+    });
+    expect(forced.surgeMultiplier).toBe(1.5);
+
+    const live = await service.calculate({
+      distanceKm: 5,
+      durationMinutes: 15,
+      zoneId: 'hex-elsewhere',
+    });
+    // Unlisted hex → live demand path (not the 2.5 city-wide legacy).
+    expect(live.surgeMultiplier).toBe(1.3);
   });
 });
