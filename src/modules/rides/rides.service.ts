@@ -1053,8 +1053,13 @@ export class RidesService {
       );
     }
     if (patch.startedAt) {
+      const liveStart =
+        ride.driverId != null
+          ? await this.readLiveDriverPoint(ride.driverId)
+          : null;
+      const startPoint = liveStart ?? ride.pickup;
       await this.routeRecorder.startRecording(rideId, {
-        ...ride.pickup,
+        ...startPoint,
         timestampMs: patch.startedAt.getTime(),
       });
     }
@@ -2354,7 +2359,13 @@ export class RidesService {
       startedAt: new Date().toISOString(),
     });
 
-    const startPt = ride.pickup ?? { lat: 8.9806, lng: 38.7578 };
+    const liveStart = await this.readLiveDriverPoint(driverId);
+    const startPt = liveStart ?? ride.pickup;
+    if (!startPt || !Number.isFinite(startPt.lat) || !Number.isFinite(startPt.lng)) {
+      throw new UnprocessableEntityException(
+        'GPS is required to start the trip. Wait for a location fix and try again.',
+      );
+    }
     await this.routeRecorder.startRecording(rideId, {
       lat: startPt.lat,
       lng: startPt.lng,

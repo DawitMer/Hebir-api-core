@@ -28,6 +28,15 @@ describe('route sample validation (SQL persistence is covered by database.e2e)',
         .reason,
     ).toBe('accuracy_too_poor');
   });
+  it('flags stationary jitter without billing', () => {
+    expect(
+      validateRouteSample(last, {
+        ...last,
+        lat: last.lat + 0.00001,
+        timestampMs: 5000,
+      }).reason,
+    ).toBe('stationary_jitter');
+  });
   it('rejects invalid coordinates', () => {
     expect(
       validateRouteSample(last, { ...last, lat: NaN, timestampMs: 10000 })

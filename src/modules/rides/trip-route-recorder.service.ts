@@ -109,6 +109,30 @@ export class TripRouteRecorderService {
           checkpoint.hasGaps = true;
           checkpoint.lastFix = sample;
           await em.save(checkpoint);
+          return {
+            accepted: false,
+            reason: validation.reason,
+            totalDistanceM: checkpoint.totalDistanceM,
+            latestPoint: checkpoint.lastFix,
+          };
+        }
+        // Stationary heartbeats must still refresh lastFix time. Otherwise a
+        // traffic jam (or simulator pin) ages the meter past STALE_FIX_MS and
+        // settlement invents last-fix → dropoff kilometres.
+        if (validation.reason === 'stationary_jitter') {
+          checkpoint.lastFix = {
+            ...sample,
+            // Keep prior coords when the delta is pure GNSS noise.
+            lat: checkpoint.lastFix.lat,
+            lng: checkpoint.lastFix.lng,
+          };
+          await em.save(checkpoint);
+          return {
+            accepted: true,
+            reason: 'stationary_heartbeat',
+            totalDistanceM: checkpoint.totalDistanceM,
+            latestPoint: checkpoint.lastFix,
+          };
         }
         return {
           accepted: false,

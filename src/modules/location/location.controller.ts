@@ -39,7 +39,8 @@ import { liveTrackFromRide, writeLiveTrack } from '../rides/ride-live-track';
 import { remainingEta } from '../rides/remaining-eta';
 import { GeocodingService } from '../../common/geocoding/geocoding.service';
 import { TripRouteRecorderService } from '../rides/trip-route-recorder.service';
-import { zoneBoundary, zoneIdFor } from '../matching/geo/geo.util';
+import { zoneBoundary, zoneCenter, zoneIdFor } from '../matching/geo/geo.util';
+import { SurgeOpsService } from '../operations/surge-ops.service';
 
 const TRACKABLE_RIDE_STATUSES = [
   RideStatus.MATCHED,
@@ -87,6 +88,7 @@ export class LocationController {
     @InjectRepository(Ride) private readonly rides: Repository<Ride>,
     private readonly notifications: NotificationsGateway,
     private readonly routeRecorder: TripRouteRecorderService,
+    private readonly surgeOps: SurgeOpsService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {
     this.historyFlushSeconds = Number(
@@ -188,11 +190,9 @@ export class LocationController {
       }
     }
 
-    if (
-      ping?.accepted !== false &&
-      [DriverStatus.ON_TRIP, DriverStatus.RESERVED].includes(status)
-    ) {
-      // Metering must commit before HTTP acknowledgement, even if geo/Redis is unavailable.
+    // Trip metering must run even when the live GEO index rejects a noisy
+    // sample — otherwise gaps freeze the meter and settlement invents km.
+    if ([DriverStatus.ON_TRIP, DriverStatus.RESERVED].includes(status)) {
       await this.broadcastAssignedLocation(user.userId, body, ping);
     }
 
@@ -242,14 +242,14 @@ export class LocationController {
       const track = liveTrackFromRide(ride);
       await writeLiveTrack(this.redis, driverId, track).catch(() => undefined);
 
-      const lat = ping?.lat ?? body.lat;
-      const lng = ping?.lng ?? body.lng;
+      const lat = body.lat;
+      const lng = body.lng;
       const timestampMs = ping?.timestampMs ?? Date.now();
       const eta =
         track.pickup && track.dropoff
           ? remainingEta({
               driver: { lat, lng },
-              speedMps: ping?.speed ?? body.speed,
+              speedMps: body.speed ?? ping?.speed,
               pickup: track.pickup,
               dropoff: track.dropoff,
               status: track.status ?? RideStatus.ACCEPTED,
@@ -266,12 +266,11 @@ export class LocationController {
               lat,
               lng,
               timestampMs,
-              heading: ping?.heading ?? body.heading ?? null,
-              speed: ping?.speed ?? body.speed ?? null,
-              accuracy: ping?.accuracy ?? body.accuracy ?? null,
+              heading: body.heading ?? ping?.heading ?? null,
+              speed: body.speed ?? ping?.speed ?? null,
+              accuracy: body.accuracy ?? ping?.accuracy ?? null,
             },
           );
-          if (!recResult.accepted) return;
           totalTraveledM = recResult.totalDistanceM;
         } catch (recErr) {
           this.logger.warn(
@@ -289,9 +288,9 @@ export class LocationController {
           driverId,
           lat,
           lng,
-          heading: ping?.heading ?? body.heading ?? null,
-          speed: ping?.speed ?? body.speed ?? null,
-          accuracy: ping?.accuracy ?? body.accuracy ?? null,
+          heading: body.heading ?? ping?.heading ?? null,
+          speed: body.speed ?? ping?.speed ?? null,
+          accuracy: body.accuracy ?? ping?.accuracy ?? null,
           timestampMs,
           seq: timestampMs,
           actualDistanceM: totalTraveledM,
@@ -369,34 +368,91 @@ export class LocationController {
     if (bbox.maxLat - bbox.minLat > 1 || bbox.maxLng - bbox.minLng > 1) {
       throw new BadRequestException('Bounding box is too large');
     }
+
+    type Cell = Record<string, unknown> & {
+      zoneId?: string;
+      lat?: number;
+      lng?: number;
+      riders?: number;
+      surgeMultiplier?: number;
+      boundary?: unknown;
+    };
+
+    let cells: Cell[] = [];
     if (this.locationSvc.enabled && !this.locationSvc.isOpen) {
       try {
         const res = await this.locationSvc.get<{
-          cells?: Array<Record<string, unknown>>;
+          cells?: Cell[];
         }>('/demand/grid', bbox, 2500);
         if (res?.cells) {
-          // Prefer exact H3 boundaries from h3-js so Driver/Rider polygons match.
-          return {
-            cells: res.cells
-              .filter((c) => Number(c.riders) > 0)
-              .map((c) => {
-                const zoneId = String(c.zoneId ?? '');
-                const h3Boundary = zoneId ? zoneBoundary(zoneId) : [];
-                return {
-                  ...c,
-                  boundary:
-                    h3Boundary.length >= 6
-                      ? h3Boundary
-                      : (c.boundary ?? h3Boundary),
-                };
-              }),
-          };
+          cells = res.cells;
         }
       } catch {
-        // Fall back to empty cells if location-svc is unavailable
+        // Fall back to ops-forced cells only if location-svc is unavailable.
       }
     }
-    return { cells: [] };
+
+    // Prefer exact H3 boundaries; keep live cells with riders OR merge ops surge.
+    const byZone = new Map<string, Cell>();
+    for (const c of cells) {
+      const zoneId = String(c.zoneId ?? '');
+      if (!zoneId) continue;
+      const h3Boundary = zoneBoundary(zoneId);
+      byZone.set(zoneId, {
+        ...c,
+        zoneId,
+        boundary:
+          h3Boundary.length >= 6 ? h3Boundary : (c.boundary ?? h3Boundary),
+      });
+    }
+
+    // Ops named-zone / hex overrides must tint Driver/Rider maps even when
+    // Redis has no live riders yet (otherwise "surge set in ops" looks dead).
+    const surgeState = this.surgeOps.getState();
+    if (surgeState.overrideEnabled) {
+      for (const [zoneId, raw] of Object.entries(surgeState.zoneOverrides)) {
+        const mult = Number(raw);
+        if (!Number.isFinite(mult) || mult <= 1.001) continue;
+        const center = zoneCenter(zoneId);
+        if (
+          !center ||
+          center.lat < bbox.minLat ||
+          center.lat > bbox.maxLat ||
+          center.lng < bbox.minLng ||
+          center.lng > bbox.maxLng
+        ) {
+          continue;
+        }
+        const existing = byZone.get(zoneId);
+        if (existing) {
+          const live = Number(existing.surgeMultiplier) || 1;
+          existing.surgeMultiplier = Math.max(live, mult);
+          existing.opsForced = true;
+        } else {
+          const boundary = zoneBoundary(zoneId);
+          byZone.set(zoneId, {
+            zoneId,
+            lat: center.lat,
+            lng: center.lng,
+            riders: 0,
+            drivers: 0,
+            busyDrivers: 0,
+            demandRatio: 0,
+            surgeMultiplier: mult,
+            opsForced: true,
+            boundary,
+          });
+        }
+      }
+    }
+
+    return {
+      cells: [...byZone.values()].filter((c) => {
+        const riders = Number(c.riders) || 0;
+        const surge = Number(c.surgeMultiplier) || 1;
+        return riders > 0 || surge > 1.01;
+      }),
+    };
   }
 
   /**
