@@ -42,6 +42,7 @@ import { FirebaseService } from './firebase/firebase.service';
   exports: [
     AuthService,
     OtpService,
+    SmsService,
     FirebaseService,
     TypeOrmModule,
     JwtModule,

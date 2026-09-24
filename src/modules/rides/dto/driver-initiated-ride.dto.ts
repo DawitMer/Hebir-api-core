@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsIn,
   IsLatitude,
   IsLongitude,
@@ -29,6 +30,14 @@ export class DriverInitiatedRideDto {
     'riderPhoneNumber must be a valid Ethiopian mobile (+2519XXXXXXXX)',
   )
   riderPhoneNumber!: string;
+
+  /**
+   * When true, create a guest street-hail (SMS verification, no Hebir account).
+   * When false/omitted, require a registered rider within 300 m (in-app code).
+   */
+  @IsOptional()
+  @IsBoolean()
+  guest?: boolean;
 
   @IsObject()
   @ValidateNested()

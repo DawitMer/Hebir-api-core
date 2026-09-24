@@ -11,7 +11,7 @@ export const FARE_PAYMENT_PROVIDER = 'FARE_PAYMENT_PROVIDER';
 
 export type SettleFareInput = {
   rideId: string;
-  riderId: string;
+  riderId: string | null;
   amountEtb: string;
   idempotencyKey: string;
 };

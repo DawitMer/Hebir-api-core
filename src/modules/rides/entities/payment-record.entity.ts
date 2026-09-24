@@ -37,8 +37,9 @@ export class PaymentRecord {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid' })
-  userId: string;
+  /** Null for guest street-hail fares (no registered rider account). */
+  @Column({ type: 'uuid', nullable: true })
+  userId: string | null;
 
   @Column({ type: 'uuid', nullable: true })
   rideId: string | null;

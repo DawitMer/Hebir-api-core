@@ -118,6 +118,7 @@ describe('RidesService.acceptOffer race', () => {
         getSimplifiedRoute: jest.fn().mockResolvedValue([]),
         startRecording: jest.fn().mockResolvedValue(undefined),
       } as never,
+      { send: jest.fn(), sendOtp: jest.fn() } as never,
     );
 
     return { service, rides, driverProfiles, ride, locationSvc };
@@ -293,6 +294,7 @@ describe('RidesService.transitionStatus geofence', () => {
           getSimplifiedRoute: jest.fn().mockResolvedValue([]),
           startRecording: jest.fn().mockResolvedValue(undefined),
         } as never,
+        { send: jest.fn(), sendOtp: jest.fn() } as never,
       );
       return { service, rides: inner, locationSvc };
     })();
@@ -358,6 +360,7 @@ describe('RidesService.transitionStatus geofence', () => {
         getSimplifiedRoute: jest.fn().mockResolvedValue([]),
         startRecording: jest.fn().mockResolvedValue(undefined),
       } as never,
+      { send: jest.fn(), sendOtp: jest.fn() } as never,
     );
 
     const result = await service.transitionStatus(
@@ -444,6 +447,7 @@ describe('RidesService.cancelRide rematch', () => {
         getSimplifiedRoute: jest.fn().mockResolvedValue([]),
         startRecording: jest.fn().mockResolvedValue(undefined),
       } as never,
+      { send: jest.fn(), sendOtp: jest.fn() } as never,
     );
     return { service, rides, ride, dispatchQueue, notifications, redis };
   }
@@ -593,6 +597,7 @@ describe('RidesService authorization and start-code gate', () => {
         getSimplifiedRoute: jest.fn().mockResolvedValue([]),
         startRecording: jest.fn().mockResolvedValue(undefined),
       } as never,
+      { send: jest.fn(), sendOtp: jest.fn() } as never,
     );
     return { service, rides, ride, redis };
   }

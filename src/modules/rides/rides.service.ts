@@ -131,6 +131,10 @@ export type EnrichedRide = Omit<Ride, 'fare'> & {
   /** Present only for the rider while a start-code gate is active. */
   startCode?: string | null;
   requiresStartCode?: boolean;
+  /** Guest street-hail metadata for the driver UI (never include plaintext code). */
+  isGuest?: boolean;
+  smsDelivery?: 'sent' | 'failed';
+  smsError?: string;
 };
 
 /** The exact server-calculated quote shown to both rider and driver. */
@@ -208,8 +212,13 @@ const LIVE_DRIVER_TRIP_STATUSES = [
 
 /** Privacy start-code for driver-initiated (street-hail) rides. */
 const START_CODE_PREFIX = 'ride:startcode:';
+/** Registered riders keep the code on-screen for the pickup wait. */
 const START_CODE_TTL_SEC = 2 * 60 * 60;
+/** Guest SMS codes match the SMS copy (5 minutes). */
+const GUEST_START_CODE_TTL_SEC = 5 * 60;
 const START_CODE_MAX_ATTEMPTS = 8;
+const GUEST_START_SMS_RESEND_COOLDOWN_SEC = 30;
+const GUEST_START_SMS_MAX_PER_HOUR = 8;
 
 type StartCodeRecord = {
   hash: string;
@@ -220,6 +229,13 @@ type StartCodeRecord = {
 import { TripRouteRecorderService } from './trip-route-recorder.service';
 import { AdRewardsService } from '../ads/ads.service';
 import { PromotionsService } from '../promotions/promotions.service';
+import { SmsService } from '../auth/sms.service';
+import {
+  formatPaymentStatusLabel,
+  guestFareCompleteSms,
+  guestStartCodeSms,
+  shortTripRef,
+} from './guest-street-hail.sms';
 
 type DispatchQueue = Pick<
   DispatchQueueService,
@@ -268,6 +284,7 @@ export class RidesService {
     @Inject(FARE_PAYMENT_PROVIDER)
     private readonly farePayments: PaymentProvider,
     private readonly routeRecorder: TripRouteRecorderService,
+    private readonly sms: SmsService,
     @Optional()
     private readonly adRewards?: AdRewardsService,
     @Optional()
@@ -1345,18 +1362,19 @@ export class RidesService {
             driverHebirCreditMinor: 0,
           };
 
-      const promoSettlement = this.promotionsService
-        ? await this.promotionsService.applyPromotionToRide(
-            em,
-            rideId,
-            lockedRide.riderId,
-            Math.max(
-              0,
-              Math.round(Number(fareRecord.total) * 100) -
-                adSettlement.appliedDiscountMinor,
-            ),
-          )
-        : { appliedDiscountMinor: 0 };
+      const promoSettlement =
+        this.promotionsService && lockedRide.riderId
+          ? await this.promotionsService.applyPromotionToRide(
+              em,
+              rideId,
+              lockedRide.riderId,
+              Math.max(
+                0,
+                Math.round(Number(fareRecord.total) * 100) -
+                  adSettlement.appliedDiscountMinor,
+              ),
+            )
+          : { appliedDiscountMinor: 0 };
 
       const promoCreditMinor =
         this.adRewards && promoSettlement.appliedDiscountMinor > 0
@@ -1521,6 +1539,15 @@ export class RidesService {
       );
     });
 
+    // Guest fare SMS is best-effort and must never undo a completed settlement.
+    void this.sendGuestFareSmsOnce(rideId, riderCashDue).catch(
+      (error: Error) => {
+        this.logger.warn(
+          `Guest fare SMS failed for ${rideId}: ${error.message}`,
+        );
+      },
+    );
+
     this.logger.log(
       `Ride ${rideId}: completed by driver ${driverId}, fare=${fareTotal}, distance=${actualDistanceM}m, duration=${actualDurationS}s, settlement=${settlementStatus}`,
     );
@@ -1559,7 +1586,7 @@ export class RidesService {
       );
     }
 
-    const streetHail = this.rideHasStartCodeGate(ride);
+    const streetHail = ride.isStreetHail || this.rideHasStartCodeGate(ride);
     const driverDropRematch =
       actorId === ride.driverId &&
       !streetHail &&
@@ -2084,8 +2111,9 @@ export class RidesService {
   }
 
   /**
-   * Driver creates an already-assigned ride (skip dispatch). Rider receives a
-   * 4-digit security code on their app; the driver must enter it to start.
+   * Driver creates an already-assigned ride (skip dispatch).
+   * Registered riders: in-app 4-digit code (proximity required).
+   * Guests (`dto.guest`): SMS code, no account, no proximity ping.
    */
   async createDriverInitiatedRide(
     driverId: string,
@@ -2100,28 +2128,70 @@ export class RidesService {
       );
     }
 
-    const rider = await this.users.findOne({
-      where: { phoneNumber: dto.riderPhoneNumber },
-    });
-    if (!rider) {
-      throw new NotFoundException('No ህብር account found for that phone number');
-    }
-    if (rider.id === driverId) {
-      throw new ConflictException(
-        'You cannot start a trip with your own account',
-      );
-    }
+    const isGuest = dto.guest === true;
+    const phone = dto.riderPhoneNumber;
 
-    const riderBusy = await this.rides.findOne({
-      where: { riderId: rider.id, status: In(ACTIVE_RIDE_STATUSES) },
-    });
-    if (riderBusy) {
-      throw new ConflictException(
-        `That rider already has a trip in progress (${riderBusy.status})`,
-      );
+    let rider: UserAccount | null = null;
+    if (!isGuest) {
+      rider = await this.users.findOne({ where: { phoneNumber: phone } });
+      if (!rider) {
+        throw new NotFoundException(
+          'No ህብር account found for that phone number. Use Guest Rider to hail without an account.',
+        );
+      }
+      if (rider.id === driverId) {
+        throw new ConflictException(
+          'You cannot start a trip with your own account',
+        );
+      }
+      const riderBusy = await this.rides.findOne({
+        where: { riderId: rider.id, status: In(ACTIVE_RIDE_STATUSES) },
+      });
+      if (riderBusy) {
+        throw new ConflictException(
+          `That rider already has a trip in progress (${riderBusy.status})`,
+        );
+      }
+      await this.assertStreetHailProximity(rider.id, dto.pickup);
+    } else {
+      // Guests must not collide with an existing registered account's active trip
+      // on the same phone, or another guest hail on that number.
+      const registered = await this.users.findOne({
+        where: { phoneNumber: phone },
+      });
+      if (registered) {
+        const busy = await this.rides.findOne({
+          where: {
+            riderId: registered.id,
+            status: In(ACTIVE_RIDE_STATUSES),
+          },
+        });
+        if (busy) {
+          throw new ConflictException(
+            'That phone already has an active Hebir trip — use Registered Rider instead',
+          );
+        }
+      }
+      const driverAccount = await this.users.findOne({
+        where: { id: driverId },
+      });
+      if (driverAccount?.phoneNumber === phone) {
+        throw new ConflictException(
+          'You cannot start a guest trip with your own phone number',
+        );
+      }
+      const guestBusy = await this.rides.findOne({
+        where: {
+          guestPhoneE164: phone,
+          status: In(ACTIVE_RIDE_STATUSES),
+        },
+      });
+      if (guestBusy) {
+        throw new ConflictException(
+          'That guest phone already has an active street pickup',
+        );
+      }
     }
-
-    await this.assertStreetHailProximity(rider.id, dto.pickup);
 
     const driverBusy = await this.rides.findOne({
       where: { driverId, status: In(ACTIVE_RIDE_STATUSES) },
@@ -2198,8 +2268,11 @@ export class RidesService {
         }
         return em.save(
           em.create(Ride, {
-            riderId: rider.id,
+            riderId: rider?.id ?? null,
             driverId,
+            isGuest,
+            isStreetHail: true,
+            guestPhoneE164: isGuest ? phone : null,
             pickup: dto.pickup,
             dropoff: dto.dropoff,
             pickupAddress: pickupAddress || dto.pickupAddress || null,
@@ -2229,16 +2302,54 @@ export class RidesService {
     }
 
     const startCode = String(randomInt(1000, 9999));
-    await this.storeStartCode(ride.id, startCode);
+    const codeTtlSec = isGuest ? GUEST_START_CODE_TTL_SEC : START_CODE_TTL_SEC;
+    await this.storeStartCode(ride.id, startCode, codeTtlSec);
     await this.logEvent(
       ride.id,
       RideStatus.ACCEPTED,
-      `Driver-initiated ride by ${driverId} for rider ${rider.id}`,
+      isGuest
+        ? `Guest street-hail by ${driverId}`
+        : `Driver-initiated ride by ${driverId} for rider ${rider!.id}`,
     );
 
     const [enriched] = await this.enrichRides([ride]);
     await writeLiveTrack(this.redis, driverId, liveTrackFromRide(ride));
-    await this.notify(rider.id, 'ride.driver_initiated', {
+
+    if (isGuest) {
+      try {
+        await this.sms.send(phone, guestStartCodeSms(startCode));
+        await this.rides.update(
+          { id: ride.id },
+          { guestStartSmsSentAt: new Date() },
+        );
+      } catch (error) {
+        this.logger.warn(
+          `Guest start SMS failed for ride ${ride.id}: ${(error as Error).message}`,
+        );
+        // Ride stays — driver can resend. Do not leak the code in the API.
+        return {
+          ...enriched,
+          requiresStartCode: true,
+          startCode: null,
+          isGuest: true,
+          smsDelivery: 'failed',
+          smsError:
+            'Could not send the verification SMS. Tap Resend code to try again.',
+        };
+      }
+      this.logger.log(
+        `Ride ${ride.id}: guest street-hail by ${driverId} (SMS sent)`,
+      );
+      return {
+        ...enriched,
+        requiresStartCode: true,
+        startCode: null,
+        isGuest: true,
+        smsDelivery: 'sent',
+      };
+    }
+
+    await this.notify(rider!.id, 'ride.driver_initiated', {
       rideId: ride.id,
       startCode,
       status: RideStatus.ACCEPTED,
@@ -2250,8 +2361,7 @@ export class RidesService {
       vehicle: enriched.vehicle,
       requiresStartCode: true,
     });
-    // Also mirror matched so older clients still open the active-ride path.
-    await this.notify(rider.id, 'ride.matched', {
+    await this.notify(rider!.id, 'ride.matched', {
       rideId: ride.id,
       driverId,
       pickupAddress: ride.pickupAddress,
@@ -2263,14 +2373,89 @@ export class RidesService {
     });
 
     this.logger.log(
-      `Ride ${ride.id}: driver-initiated by ${driverId} for rider ${rider.id}`,
+      `Ride ${ride.id}: driver-initiated by ${driverId} for rider ${rider!.id}`,
     );
     return {
       ...enriched,
       requiresStartCode: true,
-      // Never return the plaintext code to the driver.
       startCode: null,
+      isGuest: false,
     };
+  }
+
+  /**
+   * Resend guest street-hail verification SMS (cooldown + hourly cap).
+   * Registered riders refresh via the app — this endpoint refuses them.
+   */
+  async resendGuestStartCode(
+    rideId: string,
+    driverId: string,
+  ): Promise<{ ok: true; smsDelivery: 'sent' }> {
+    const ride = await this.rides.findOne({ where: { id: rideId } });
+    if (!ride) throw new NotFoundException('Ride not found');
+    if (ride.driverId !== driverId) {
+      throw new ForbiddenException('You are not the driver on this ride');
+    }
+    if (!ride.isGuest || !ride.guestPhoneE164) {
+      throw new BadRequestException(
+        'Resend is only for guest street pickups — registered riders see the code in their app',
+      );
+    }
+    if (
+      ride.status !== RideStatus.ACCEPTED &&
+      ride.status !== RideStatus.ARRIVING
+    ) {
+      throw new ConflictException(
+        `Cannot resend code while ride is ${ride.status}`,
+      );
+    }
+
+    const cooldownKey = `ride:guest-sms-cd:${rideId}`;
+    const hourKey = `ride:guest-sms-hr:${ride.guestPhoneE164}`;
+    const cd = await this.redis.set(
+      cooldownKey,
+      '1',
+      'EX',
+      GUEST_START_SMS_RESEND_COOLDOWN_SEC,
+      'NX',
+    );
+    if (cd !== 'OK') {
+      throw new BadRequestException(
+        `Wait ${GUEST_START_SMS_RESEND_COOLDOWN_SEC} seconds before resending`,
+      );
+    }
+    const sentHour = await this.redis.incr(hourKey);
+    if (sentHour === 1) {
+      await this.redis.expire(hourKey, 3600);
+    }
+    if (sentHour > GUEST_START_SMS_MAX_PER_HOUR) {
+      throw new BadRequestException(
+        'Too many verification SMS for this number — try again later',
+      );
+    }
+
+    const startCode = String(randomInt(1000, 9999));
+    await this.storeStartCode(rideId, startCode, GUEST_START_CODE_TTL_SEC);
+    try {
+      await this.sms.send(ride.guestPhoneE164, guestStartCodeSms(startCode));
+      await this.rides.update(
+        { id: rideId },
+        { guestStartSmsSentAt: new Date() },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Guest start SMS resend failed for ${rideId}: ${(error as Error).message}`,
+      );
+      throw new ServiceUnavailableException(
+        'Could not send the verification SMS. Try again in a moment.',
+      );
+    }
+    await this.logEvent(
+      rideId,
+      ride.status,
+      `Guest start code resent by driver ${driverId}`,
+    );
+    return { ok: true, smsDelivery: 'sent' };
   }
 
   /**
@@ -2389,9 +2574,13 @@ export class RidesService {
     return `${START_CODE_PREFIX}${rideId}`;
   }
 
-  private async storeStartCode(rideId: string, plain: string): Promise<void> {
+  private async storeStartCode(
+    rideId: string,
+    plain: string,
+    ttlSec: number = START_CODE_TTL_SEC,
+  ): Promise<void> {
     const hash = this.hashStartCode(rideId, plain);
-    const expiresAt = new Date(Date.now() + START_CODE_TTL_SEC * 1000);
+    const expiresAt = new Date(Date.now() + ttlSec * 1000);
     await this.rides.update(
       { id: rideId },
       {
@@ -2408,13 +2597,54 @@ export class RidesService {
     try {
       await this.redis.setex(
         this.startCodeKey(rideId),
-        START_CODE_TTL_SEC,
+        ttlSec,
         JSON.stringify(record),
       );
     } catch (error) {
       this.logger.warn(
         `Start-code display cache failed for ${rideId}: ${(error as Error).message}`,
       );
+    }
+  }
+
+  /**
+   * One-shot fare SMS after guest trip completion. Idempotent via
+   * guestFareSmsSentAt + Redis NX so retries / dual workers never double-bill SMS.
+   */
+  private async sendGuestFareSmsOnce(
+    rideId: string,
+    fareEtb: string,
+  ): Promise<void> {
+    const ride = await this.rides.findOne({ where: { id: rideId } });
+    if (!ride?.isGuest || !ride.guestPhoneE164) return;
+    if (ride.guestFareSmsSentAt) return;
+
+    const lockKey = `ride:guest-fare-sms:${rideId}`;
+    const locked = await this.redis
+      .set(lockKey, '1', 'EX', 86400, 'NX')
+      .catch(() => null);
+    if (locked !== 'OK') return;
+
+    const payment = await this.payments.findOne({
+      where: { rideId, type: PaymentType.FARE },
+      order: { createdAt: 'DESC' },
+    });
+    const paymentStatus = formatPaymentStatusLabel(payment?.status ?? null);
+    const body = guestFareCompleteSms({
+      tripRef: shortTripRef(rideId),
+      fareEtb: String(fareEtb),
+      paymentStatus,
+    });
+
+    try {
+      await this.sms.send(ride.guestPhoneE164, body);
+      await this.rides.update(
+        { id: rideId, guestFareSmsSentAt: IsNull() },
+        { guestFareSmsSentAt: new Date() },
+      );
+    } catch (error) {
+      await this.redis.del(lockKey).catch(() => undefined);
+      throw error;
     }
   }
 
@@ -2459,7 +2689,9 @@ export class RidesService {
     const ride = await this.rides.findOne({ where: { id: rideId } });
     if (!ride || !this.rideHasStartCodeGate(ride)) {
       throw new UnauthorizedException(
-        'Security code expired — ask the rider to reopen the app',
+        ride?.isGuest
+          ? 'Security code expired — tap Resend code to send a new SMS'
+          : 'Security code expired — ask the rider to reopen the app',
       );
     }
     if ((ride.startCodeAttempts ?? 0) >= START_CODE_MAX_ATTEMPTS) {
@@ -2747,6 +2979,10 @@ export class RidesService {
         startCodeHash: null,
         startCodeAttempts: 0,
         startCodeExpiresAt: null,
+        // Never expose guest MSISDN to clients after create.
+        guestPhoneE164: null,
+        isGuest: ride.isGuest === true,
+        isStreetHail: ride.isStreetHail === true,
         fare: fareRec ?? null,
         tipAmount: tip ? Number(tip.amount) : 0,
         driver: driver
@@ -2837,10 +3073,11 @@ export class RidesService {
    * dispatch job or roll a caller's state transition back.
    */
   private async notify(
-    userId: string,
+    userId: string | null | undefined,
     event: string,
     payload: unknown,
   ): Promise<void> {
+    if (!userId) return;
     try {
       await this.notifications.notify(userId, event, payload);
     } catch (error) {
@@ -2851,7 +3088,11 @@ export class RidesService {
   }
 
   /** On-demand surge: distinct rider in the pickup H3 hex while searching. */
-  private recordOnDemandRequest(pickup: GeoPoint, riderId: string): void {
+  private recordOnDemandRequest(
+    pickup: GeoPoint,
+    riderId: string | null | undefined,
+  ): void {
+    if (!riderId) return;
     if (!this.locationSvc.enabled || this.locationSvc.isOpen) return;
     void this.locationSvc
       .post(
@@ -2873,7 +3114,8 @@ export class RidesService {
    * Skips release when another SEARCHING/OFFERED ride already exists for the
    * same rider (Retry can race a late unmatched release).
    */
-  private releaseOnDemandRequest(riderId: string): void {
+  private releaseOnDemandRequest(riderId: string | null | undefined): void {
+    if (!riderId) return;
     if (!this.locationSvc.enabled || this.locationSvc.isOpen) return;
     void (async () => {
       try {

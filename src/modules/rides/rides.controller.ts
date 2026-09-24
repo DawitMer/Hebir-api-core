@@ -75,6 +75,23 @@ export class RidesController {
     return this.ridesService.createDriverInitiatedRide(user.userId, dto);
   }
 
+  /** Resend guest street-hail verification SMS (cooldown + rate limited). */
+  @UseGuards(JwtAuthGuard, RolesGuard, RedisRateLimitGuard)
+  @Roles(UserRole.DRIVER)
+  @RateLimit({
+    prefix: 'rl:guest-start-sms',
+    limit: 10,
+    windowSec: 60,
+    keyBy: 'user',
+  })
+  @Post(':id/start-code/resend')
+  resendStartCode(
+    @CurrentUser() user: AuthedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.ridesService.resendGuestStartCode(id, user.userId);
+  }
+
   /** Current live offer for this driver (one-shot reconnect catch-up). */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.DRIVER)

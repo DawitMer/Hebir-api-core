@@ -40,11 +40,30 @@ export class Ride {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid' })
-  riderId: string;
+  /** Null for guest street-hail (no Hebir account). */
+  @Column({ type: 'uuid', nullable: true })
+  riderId: string | null;
 
   @Column({ type: 'uuid', nullable: true })
   driverId: string | null;
+
+  /** True when the trip was created via driver street-hail (registered or guest). */
+  @Column({ type: 'boolean', default: false })
+  isStreetHail: boolean;
+
+  /** True when the passenger has no Hebir account (SMS verification). */
+  @Column({ type: 'boolean', default: false })
+  isGuest: boolean;
+
+  /** E.164 guest phone; never returned to the driver after create. */
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  guestPhoneE164: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  guestStartSmsSentAt: Date | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  guestFareSmsSentAt: Date | null;
 
   @Column({ type: 'enum', enum: RideStatus, default: RideStatus.REQUESTED })
   status: RideStatus;

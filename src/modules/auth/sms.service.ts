@@ -11,10 +11,20 @@ export class SmsService {
   constructor(private readonly config: ConfigService) {}
 
   async sendOtp(phoneNumber: string, code: string): Promise<void> {
+    await this.send(
+      phoneNumber,
+      `ህብር code: ${code}. Expires in 5 minutes. Do not share it.`,
+    );
+  }
+
+  /**
+   * Generic SMS send (OTP, street-hail verification, fare summary).
+   * Reuses the configured Ethiopia-capable provider — never hardcode credentials.
+   */
+  async send(phoneNumber: string, body: string): Promise<void> {
     const provider = (this.config.get<string>('SMS_PROVIDER') ?? '')
       .trim()
       .toLowerCase();
-    const body = `ህብር code: ${code}. Expires in 5 minutes. Do not share it.`;
 
     if (provider === 'afromessage') {
       await this.sendAfroMessage(phoneNumber, body);
