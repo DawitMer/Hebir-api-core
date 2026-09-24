@@ -231,9 +231,12 @@ import { AdRewardsService } from '../ads/ads.service';
 import { PromotionsService } from '../promotions/promotions.service';
 import { SmsService } from '../auth/sms.service';
 import {
+  formatKm,
   formatPaymentStatusLabel,
   guestFareCompleteSms,
   guestStartCodeSms,
+  guestTripStartedSms,
+  placeLabel,
   shortTripRef,
 } from './guest-street-hail.sms';
 
@@ -2128,12 +2131,19 @@ export class RidesService {
       );
     }
 
-    const isGuest = dto.guest === true;
     const phone = dto.riderPhoneNumber;
+    const existingAccount = await this.users.findOne({
+      where: { phoneNumber: phone },
+    });
+    // Unregistered phone → guest SMS path. Explicit guest=true forces SMS even
+    // if an account exists (driver chose Guest). Explicit guest=false keeps
+    // registered-only (404 when missing).
+    const isGuest =
+      dto.guest === true || (dto.guest !== false && !existingAccount);
 
     let rider: UserAccount | null = null;
     if (!isGuest) {
-      rider = await this.users.findOne({ where: { phoneNumber: phone } });
+      rider = existingAccount;
       if (!rider) {
         throw new NotFoundException(
           'No ህብር account found for that phone number. Use Guest Rider to hail without an account.',
@@ -2156,13 +2166,10 @@ export class RidesService {
     } else {
       // Guests must not collide with an existing registered account's active trip
       // on the same phone, or another guest hail on that number.
-      const registered = await this.users.findOne({
-        where: { phoneNumber: phone },
-      });
-      if (registered) {
+      if (existingAccount) {
         const busy = await this.rides.findOne({
           where: {
-            riderId: registered.id,
+            riderId: existingAccount.id,
             status: In(ACTIVE_RIDE_STATUSES),
           },
         });
@@ -2566,6 +2573,15 @@ export class RidesService {
         liveTrackFromRide(updated),
       );
     }
+
+    if (updated.isGuest && updated.guestPhoneE164) {
+      void this.sendGuestTripStartedSmsOnce(updated).catch((error: Error) => {
+        this.logger.warn(
+          `Guest trip-start SMS failed for ${rideId}: ${error.message}`,
+        );
+      });
+    }
+
     const [enriched] = await this.enrichRides([updated]);
     return { ...enriched, requiresStartCode: false, startCode: null };
   }
@@ -2608,8 +2624,40 @@ export class RidesService {
   }
 
   /**
-   * One-shot fare SMS after guest trip completion. Idempotent via
-   * guestFareSmsSentAt + Redis NX so retries / dual workers never double-bill SMS.
+   * One-shot route SMS when a guest trip starts (pickup / dropoff / quoted km).
+   */
+  private async sendGuestTripStartedSmsOnce(ride: Ride): Promise<void> {
+    if (!ride.isGuest || !ride.guestPhoneE164) return;
+    const lockKey = `ride:guest-trip-sms:${ride.id}`;
+    const locked = await this.redis
+      .set(lockKey, '1', 'EX', 86400, 'NX')
+      .catch(() => null);
+    if (locked !== 'OK') return;
+
+    const distanceKm = formatKm(
+      ride.distanceM != null && ride.distanceM > 0
+        ? ride.distanceM
+        : 0,
+      true,
+    );
+    const body = guestTripStartedSms({
+      tripRef: shortTripRef(ride.id),
+      pickup: placeLabel(ride.pickupAddress, ride.pickup),
+      dropoff: placeLabel(ride.dropoffAddress, ride.dropoff),
+      distanceKm,
+    });
+    try {
+      await this.sms.send(ride.guestPhoneE164, body);
+    } catch (error) {
+      await this.redis.del(lockKey).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /**
+   * One-shot fare receipt SMS after guest trip completion. Includes actual km,
+   * start/destination, fare, and payment status. Idempotent via
+   * guestFareSmsSentAt + Redis NX.
    */
   private async sendGuestFareSmsOnce(
     rideId: string,
@@ -2630,8 +2678,23 @@ export class RidesService {
       order: { createdAt: 'DESC' },
     });
     const paymentStatus = formatPaymentStatusLabel(payment?.status ?? null);
+    const actualM =
+      ride.actualDistanceM != null && ride.actualDistanceM > 0
+        ? ride.actualDistanceM
+        : (ride.distanceM ?? 0);
+    const durationMin =
+      ride.actualDurationS != null && ride.actualDurationS > 0
+        ? String(Math.max(1, Math.round(ride.actualDurationS / 60)))
+        : ride.durationS != null && ride.durationS > 0
+          ? String(Math.max(1, Math.round(ride.durationS / 60)))
+          : null;
+
     const body = guestFareCompleteSms({
       tripRef: shortTripRef(rideId),
+      pickup: placeLabel(ride.pickupAddress, ride.pickup),
+      dropoff: placeLabel(ride.dropoffAddress, ride.dropoff),
+      distanceKm: formatKm(actualM, true),
+      durationMinutes: durationMin,
       fareEtb: String(fareEtb),
       paymentStatus,
     });
