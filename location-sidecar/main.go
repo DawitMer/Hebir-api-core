@@ -60,6 +60,7 @@ func main() {
 	mux.HandleFunc("POST /drivers/location", limit(gpsLimit(h.UpdateDriverLocation)))
 	mux.HandleFunc("POST /drivers/offline", limit(h.RemoveDriverLocation))
 	mux.HandleFunc("POST /drivers/nearby", limit(writeLimit(h.NearbyDrivers)))
+	mux.HandleFunc("POST /drivers/nearby-zones", limit(writeLimit(h.NearbyDriversInZones)))
 	mux.HandleFunc("GET /drivers/locations", h.ListDriverLocations)
 	mux.HandleFunc("GET /drivers/point/{driverId}", h.GetDriverPoint)
 	mux.HandleFunc("POST /demand/request", limit(writeLimit(h.RecordRiderDemand)))

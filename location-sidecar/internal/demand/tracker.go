@@ -172,6 +172,39 @@ func (t *Tracker) countFresh(ctx context.Context, key string) (int64, error) {
 	return n, err
 }
 
+// FreshSupplyDrivers returns distinct available driver ids across the given
+// H3 zone ids (same demand:supply sets used for map heat / surge).
+func (t *Tracker) FreshSupplyDrivers(ctx context.Context, zoneIDs []string) ([]string, error) {
+	seen := make(map[string]struct{}, 32)
+	out := make([]string, 0, 32)
+	now := float64(time.Now().Unix())
+	for _, zoneID := range zoneIDs {
+		if zoneID == "" {
+			continue
+		}
+		key := supplyKey(zoneID)
+		_ = t.redis.ZRemRangeByScore(ctx, key, "-inf", fmt.Sprintf("%f", now)).Err()
+		members, err := t.redis.ZRangeByScore(ctx, key, &redis.ZRangeBy{
+			Min: fmt.Sprintf("%f", now),
+			Max: "+inf",
+		}).Result()
+		if err != nil && err != redis.Nil {
+			return nil, err
+		}
+		for _, id := range members {
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
 // Snapshot is live hex marketplace state.
 type Snapshot struct {
 	ZoneID          string   `json:"zoneId"`

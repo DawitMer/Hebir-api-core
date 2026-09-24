@@ -368,6 +368,80 @@ func (h *Handlers) NearbyDrivers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"driverIds": ids})
 }
 
+// NearbyDriversInZones handles POST /drivers/nearby-zones — H3 hex-ring
+// supply lookup (same demand:supply:* sets as map heat). Api-core sends
+// zoneIds from h3-js gridDisk; optional pickup+radiusKm ranks by distance.
+func (h *Handlers) NearbyDriversInZones(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ZoneIDs  []string  `json:"zoneIds"`
+		Pickup   geo.Point `json:"pickup"`
+		RadiusKm float64   `json:"radiusKm"`
+		Limit    int       `json:"limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(req.ZoneIDs) == 0 {
+		writeJSON(w, map[string]any{"driverIds": []string{}})
+		return
+	}
+	if len(req.ZoneIDs) > 200 {
+		req.ZoneIDs = req.ZoneIDs[:200]
+	}
+	ids, err := h.Demand.FreshSupplyDrivers(r.Context(), req.ZoneIDs)
+	if err != nil {
+		log.Printf("NearbyDriversInZones failed: %v", err)
+		http.Error(w, "hex nearby search failed", http.StatusInternalServerError)
+		return
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	// When pickup is valid, prefer GEO-ranked order among hex members so
+	// dispatch still sorts by approximate road distance (haversine proxy).
+	if geo.ValidPoint(req.Pickup) && len(ids) > 0 {
+		req.RadiusKm = geo.ClampRadiusKm(req.RadiusKm, 1.5)
+		ranked, rankErr := h.Store.NearestDrivers(r.Context(), req.Pickup, req.RadiusKm, max(req.Limit, 40))
+		if rankErr == nil && len(ranked) > 0 {
+			inHex := make(map[string]struct{}, len(ids))
+			for _, id := range ids {
+				inHex[id] = struct{}{}
+			}
+			ordered := make([]string, 0, len(ids))
+			seen := make(map[string]struct{}, len(ids))
+			for _, id := range ranked {
+				if _, ok := inHex[id]; !ok {
+					continue
+				}
+				if _, ok := seen[id]; ok {
+					continue
+				}
+				seen[id] = struct{}{}
+				ordered = append(ordered, id)
+			}
+			for _, id := range ids {
+				if _, ok := seen[id]; ok {
+					continue
+				}
+				ordered = append(ordered, id)
+			}
+			ids = ordered
+		}
+	}
+	if req.Limit > 0 && len(ids) > req.Limit {
+		ids = ids[:req.Limit]
+	}
+	writeJSON(w, map[string]any{"driverIds": ids})
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // ListDriverLocations handles GET /drivers/locations?lat=&lng=&radiusKm=&limit=
 // Used by the Operations portal fleet map (live Redis GEO positions).
 func (h *Handlers) ListDriverLocations(w http.ResponseWriter, r *http.Request) {

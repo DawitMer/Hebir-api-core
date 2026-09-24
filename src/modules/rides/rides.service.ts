@@ -15,6 +15,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   In,
+  IsNull,
   LessThan,
   MoreThan,
   Not,
@@ -58,20 +59,20 @@ import { KycService } from '../kyc/kyc.service';
 import { VerificationStatus } from '../kyc/entities/driver-verification.entity';
 import { NotificationsGateway } from '../notifications/notifications.gateway';
 import { GeoPoint } from '../matching/entities/trip.entity';
-import { haversineKm, zoneIdFor } from '../matching/geo/geo.util';
 import {
   DispatchJob,
   DispatchState,
   MAX_DISPATCH_MS,
   MAX_RADIUS_KM,
   OFFER_TIMEOUT_MS,
-  RADIUS_EXPAND_KM,
   DISPATCH_POLL_MS,
+  expandDispatchSearch,
   shouldEndEmptySearch,
 } from './dispatch/dispatch.types';
 import { DispatchQueueService } from './dispatch/dispatch.queue.service';
 import { LocationSvcClient } from '../../common/location-svc/location-svc.client';
 import { GeocodingService } from '../../common/geocoding/geocoding.service';
+import { GoogleRoutesService } from '../../common/geocoding/google-routes.service';
 import {
   clearLiveTrack,
   liveTrackFromRide,
@@ -96,6 +97,7 @@ import {
   FARE_PAYMENT_PROVIDER,
   PaymentProvider,
 } from '../payments/payment-provider';
+import { hexCellsAround, haversineKm, zoneIdFor } from '../matching/geo/geo.util';
 
 export type EnrichedRide = Omit<Ride, 'fare'> & {
   fare: FareRecord | null;
@@ -259,6 +261,7 @@ export class RidesService {
     private readonly config: ConfigService,
     private readonly locationSvc: LocationSvcClient,
     private readonly geocoding: GeocodingService,
+    private readonly googleRoutes: GoogleRoutesService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Inject(forwardRef(() => DispatchQueueService))
     private readonly dispatchQueue: DispatchQueue,
@@ -403,8 +406,8 @@ export class RidesService {
   }
 
   /**
-   * One expanding-radius search step: offer to the next eligible driver or
-   * expand radius / finish unmatched. Schedules the next Redis job and returns.
+   * One expanding-hex-ring search step: offer to the next eligible driver or
+   * expand the H3 ring / finish unmatched. Schedules the next Redis job and returns.
    */
   private async dispatchTick(job: DispatchJob): Promise<void> {
     const { rideId } = job;
@@ -433,9 +436,10 @@ export class RidesService {
     }
 
     const triedDriverIds = new Set(job.triedDriverIds);
+    let hexRing = typeof job.hexRing === 'number' ? job.hexRing : 0;
     let radiusKm = job.radiusKm;
 
-    const nearby = await this.findNearbyDrivers(ride.pickup, radiusKm);
+    const nearby = await this.findNearbyDrivers(ride.pickup, radiusKm, hexRing);
     let candidateIds = nearby.driverIds;
     let source = nearby.source;
     let eligible = await this.filterEligibleDrivers(
@@ -449,7 +453,7 @@ export class RidesService {
     // radius on the same polluted set.
     if (
       eligible.length === 0 &&
-      source === 'location-svc' &&
+      (source === 'location-svc' || source === 'location-svc-hex') &&
       candidateIds.length > 0
     ) {
       const fallbackIds = await this.nearbyDriverIdsFromHistory(
@@ -470,10 +474,14 @@ export class RidesService {
         );
       }
     }
-    const ranked = this.rankCandidates(eligible, candidateIds);
+    const ranked = await this.rankCandidatesByPickupEta(
+      eligible,
+      candidateIds,
+      ride.pickup,
+    );
 
     this.logger.log(
-      `Dispatch ${rideId}: radius=${radiusKm}km source=${source} ` +
+      `Dispatch ${rideId}: hexRing=${hexRing} radius=${radiusKm}km source=${source} ` +
         `nearby=${candidateIds.length} eligible=${ranked.length}`,
     );
 
@@ -489,6 +497,7 @@ export class RidesService {
 
       const state: DispatchState = {
         startedAt: job.startedAt,
+        hexRing,
         radiusKm,
         triedDriverIds: [...triedDriverIds],
       };
@@ -518,27 +527,29 @@ export class RidesService {
       return;
     }
 
-    // No offer this tick — expand gradually, or end the attempt at the cap
+    // No offer this tick — expand one H3 ring, or end the attempt at the cap
     // so the rider sees Retry instead of waiting the full 6 minutes in an
     // empty city / exhausted local pool.
-    if (shouldEndEmptySearch(radiusKm)) {
+    if (shouldEndEmptySearch(radiusKm, hexRing)) {
       this.logger.log(
-        `Dispatch ${rideId}: no eligible drivers at max radius ${MAX_RADIUS_KM}km — unmatched`,
+        `Dispatch ${rideId}: no eligible drivers at max hex ring ${hexRing} ` +
+          `(~${MAX_RADIUS_KM}km) — unmatched`,
       );
       await this.markUnmatched(rideId);
       await this.dispatchQueue.clearState(rideId);
       return;
     }
 
-    radiusKm = Math.min(radiusKm + RADIUS_EXPAND_KM, MAX_RADIUS_KM);
-    const state: DispatchState = {
+    const expanded = expandDispatchSearch({
       startedAt: job.startedAt,
+      hexRing,
       radiusKm,
       triedDriverIds: [...triedDriverIds],
-    };
-    await this.dispatchQueue.saveState(rideId, state);
+    });
+    await this.dispatchQueue.saveState(rideId, expanded);
     this.logger.log(
-      `Dispatch ${rideId}: no eligible drivers, expanding radius to ${radiusKm}km`,
+      `Dispatch ${rideId}: no eligible drivers, expanding hex ring ` +
+        `${hexRing} → ${expanded.hexRing} (radius ${expanded.radiusKm}km)`,
     );
     // Keep live demand fresh while the rider is still searching (5 min TTL).
     this.recordOnDemandRequest(ride.pickup, ride.riderId);
@@ -839,6 +850,7 @@ export class RidesService {
 
     const [enriched] = await this.enrichRides([accepted]);
     await writeLiveTrack(this.redis, driverId, liveTrackFromRide(accepted));
+    const acceptedAt = new Date().toISOString();
     await this.notify(accepted.riderId, 'ride.matched', {
       rideId,
       driverId,
@@ -846,6 +858,14 @@ export class RidesService {
       dropoffAddress: accepted.dropoffAddress,
       driver: enriched.driver,
       vehicle: enriched.vehicle,
+      updatedAt: acceptedAt,
+      status: RideStatus.ACCEPTED,
+    });
+    await this.notify(accepted.riderId, 'ride.status_changed', {
+      rideId,
+      status: RideStatus.ACCEPTED,
+      updatedAt: acceptedAt,
+      previousStatus: RideStatus.MATCHED,
     });
 
     await this.releaseDriverLock(driverId, rideId);
@@ -869,6 +889,7 @@ export class RidesService {
       { id: rideId, status: RideStatus.MATCHED, driverId },
       {
         status: RideStatus.CANCELLED,
+        driverId: null,
         offerDriverId: null,
         offerExpiresAt: null,
       },
@@ -1041,11 +1062,21 @@ export class RidesService {
 
     const counterpartId =
       actorId === ride.riderId ? ride.driverId : ride.riderId;
-    if (counterpartId) {
-      await this.notify(counterpartId, 'ride.status_changed', {
-        rideId,
-        status: nextStatus,
-      });
+    const statusPayload = {
+      rideId,
+      status: nextStatus,
+      updatedAt: new Date().toISOString(),
+      previousStatus,
+    };
+    // Notify both participants so reconnecting clients reconcile the same
+    // authoritative transition (not only the counterpart).
+    const recipients = new Set(
+      [counterpartId, ride.riderId, ride.driverId].filter(
+        (id): id is string => !!id,
+      ),
+    );
+    for (const userId of recipients) {
+      await this.notify(userId, 'ride.status_changed', statusPayload);
     }
 
     this.logger.log(
@@ -1550,6 +1581,7 @@ export class RidesService {
       },
       {
         status: RideStatus.CANCELLED,
+        driverId: null,
         offerDriverId: null,
         offerExpiresAt: null,
       },
@@ -1583,14 +1615,39 @@ export class RidesService {
         DriverStatus.ON_TRIP,
       ]);
       await this.releaseDriverLock(heldDriverId, rideId);
+      await clearLiveTrack(this.redis, heldDriverId, rideId).catch(
+        (error: Error) => {
+          this.logger.warn(
+            `clearLiveTrack on cancel failed: ${error.message}`,
+          );
+        },
+      );
     }
 
     await this.dispatchQueue.clearState(rideId);
 
+    const cancelPayload = {
+      rideId,
+      reason,
+      updatedAt: new Date().toISOString(),
+      cancelledBy: actorId === ride.riderId ? 'rider' : 'driver',
+      status: RideStatus.CANCELLED,
+    };
     const counterpartId =
       actorId === ride.riderId ? heldDriverId : ride.riderId;
-    if (counterpartId) {
-      await this.notify(counterpartId, 'ride.cancelled', { rideId, reason });
+    // Notify both participants so second devices leave matching / trip UI.
+    const recipients = new Set(
+      [counterpartId, ride.riderId, heldDriverId].filter(
+        (id): id is string => !!id,
+      ),
+    );
+    for (const userId of recipients) {
+      await this.notify(userId, 'ride.cancelled', cancelPayload);
+      await this.notify(userId, 'ride.status_changed', {
+        rideId,
+        status: RideStatus.CANCELLED,
+        updatedAt: cancelPayload.updatedAt,
+      });
     }
 
     this.releaseOnDemandRequest(ride.riderId);
@@ -1626,6 +1683,11 @@ export class RidesService {
         offerDriverId: null,
         offerExpiresAt: null,
         matchedAt: null,
+        // Fresh dispatch budget — reaper keys off requestedAt; without this a
+        // long first search + arrive + cancel would unmatched within ~15s.
+        requestedAt: new Date(),
+        // Previous driver's wait clock must not apply to the next assignment.
+        arrivedAt: null,
       },
     );
     if (!reset.affected) {
@@ -1656,6 +1718,9 @@ export class RidesService {
       DriverStatus.ON_TRIP,
     ]);
     await this.releaseDriverLock(driverId, rideId);
+    await clearLiveTrack(this.redis, driverId, rideId).catch((error: Error) => {
+      this.logger.warn(`clearLiveTrack on rematch failed: ${error.message}`);
+    });
 
     await this.dispatchQueue.clearState(rideId);
     try {
@@ -1672,10 +1737,21 @@ export class RidesService {
     await this.notify(ride.riderId, 'ride.rematching', {
       rideId,
       reason: reason ?? 'Driver cancelled',
+      updatedAt: new Date().toISOString(),
+      status: RideStatus.SEARCHING,
     });
     await this.notify(ride.riderId, 'ride.status_changed', {
       rideId,
       status: RideStatus.SEARCHING,
+      updatedAt: new Date().toISOString(),
+      previousStatus: ride.status,
+    });
+    // Cancelling driver must leave the trip UI immediately.
+    await this.notify(driverId, 'ride.status_changed', {
+      rideId,
+      status: RideStatus.SEARCHING,
+      updatedAt: new Date().toISOString(),
+      rematched: true,
     });
     // Rider is searching again — restore live demand in the pickup hex.
     this.recordOnDemandRequest(ride.pickup, ride.riderId);
@@ -1788,7 +1864,14 @@ export class RidesService {
     limit = 50,
   ): Promise<EnrichedRide[]> {
     const rides = await this.rides.find({
-      where: { riderId },
+      where: {
+        riderId,
+        status: In([
+          RideStatus.COMPLETED,
+          RideStatus.CANCELLED,
+          RideStatus.UNMATCHED,
+        ]),
+      },
       order: { createdAt: 'DESC' },
       take: Math.min(Math.max(1, limit), MAX_RIDE_PAGE),
     });
@@ -1806,7 +1889,14 @@ export class RidesService {
     limit = 50,
   ): Promise<EnrichedRide[]> {
     const rides = await this.rides.find({
-      where: { driverId },
+      where: {
+        driverId,
+        status: In([
+          RideStatus.COMPLETED,
+          RideStatus.CANCELLED,
+          RideStatus.UNMATCHED,
+        ]),
+      },
       order: { createdAt: 'DESC' },
       take: Math.min(Math.max(1, limit), MAX_RIDE_PAGE),
     });
@@ -1858,9 +1948,28 @@ export class RidesService {
       },
       order: { updatedAt: 'DESC' },
     });
-    if (!ride) return null;
-    const [enriched] = await this.enrichRides([ride]);
-    return this.attachStartCodeForViewer(enriched, ride, driverId);
+    if (ride) {
+      const [enriched] = await this.enrichRides([ride]);
+      return this.attachStartCodeForViewer(enriched, ride, driverId);
+    }
+    // Mid-offer after app restart — same endpoint so the portal can resume
+    // the sheet without a separate poll race.
+    const offered = await this.rides.findOne({
+      where: {
+        offerDriverId: driverId,
+        status: RideStatus.OFFERED,
+      },
+      order: { updatedAt: 'DESC' },
+    });
+    if (!offered) return null;
+    if (
+      offered.offerExpiresAt &&
+      offered.offerExpiresAt.getTime() <= Date.now()
+    ) {
+      return null;
+    }
+    const [enriched] = await this.enrichRides([offered]);
+    return this.attachStartCodeForViewer(enriched, offered, driverId);
   }
 
   /**
@@ -2686,6 +2795,12 @@ export class RidesService {
     // driver would stay `reserved` forever and never be offered another ride.
     if (ride.offerDriverId) {
       await this.releaseOfferedDriver(ride.offerDriverId, rideId);
+      await this.notify(ride.offerDriverId, 'ride.status_changed', {
+        rideId,
+        status: RideStatus.UNMATCHED,
+        updatedAt: new Date().toISOString(),
+      });
+      await this.notify(ride.offerDriverId, 'ride.unmatched', { rideId });
     }
 
     await this.notify(ride.riderId, 'ride.unmatched', { rideId });
@@ -2905,16 +3020,36 @@ export class RidesService {
   }
 
   /**
-   * Candidate drivers near a pickup. location-svc owns the live geo index;
-   * when it is unreachable we fall back to the last known position each
-   * driver flushed to Postgres so dispatch degrades instead of silently
+   * Candidate drivers near a pickup. Prefer H3 hex-ring supply sets from
+   * location-svc (same cells as demand heat), then Redis GEO radius, then
+   * Postgres location history so dispatch degrades instead of silently
    * reporting "no drivers nearby".
    */
   private async findNearbyDrivers(
     pickup: GeoPoint,
     radiusKm: number,
-  ): Promise<{ driverIds: string[]; source: 'location-svc' | 'db-fallback' }> {
+    hexRing = 0,
+  ): Promise<{
+    driverIds: string[];
+    source: 'location-svc-hex' | 'location-svc' | 'db-fallback';
+  }> {
+    const zoneIds = hexCellsAround(pickup, hexRing);
     if (this.locationSvc.enabled && !this.locationSvc.isOpen) {
+      try {
+        const hexData = await this.locationSvc.post<{ driverIds: string[] }>(
+          '/drivers/nearby-zones',
+          { zoneIds, pickup, radiusKm, limit: 40 },
+          1500,
+        );
+        const hexIds = hexData.driverIds ?? [];
+        if (hexIds.length > 0) {
+          return { driverIds: hexIds, source: 'location-svc-hex' };
+        }
+      } catch (error) {
+        this.logger.warn(
+          `Hex nearby lookup failed (ring=${hexRing}): ${(error as Error).message}`,
+        );
+      }
       try {
         const data = await this.locationSvc.post<{ driverIds: string[] }>(
           '/drivers/nearby',
@@ -3123,6 +3258,107 @@ export class RidesService {
   }
 
   /**
+   * Rank by road-network pickup ETA when Directions is available, else
+   * GEO/haversine order, then rating and idle time.
+   */
+  private async rankCandidatesByPickupEta(
+    eligible: DriverProfile[],
+    nearestFirstDriverIds: string[],
+    pickup: GeoPoint,
+  ): Promise<DriverProfile[]> {
+    if (eligible.length <= 1) return eligible;
+
+    const geoRank = new Map(
+      nearestFirstDriverIds.map((id, index) => [id, index]),
+    );
+    const etaBudget = Math.min(8, eligible.length);
+    const top = [...eligible]
+      .sort(
+        (a, b) =>
+          (geoRank.get(a.userId) ?? Number.MAX_SAFE_INTEGER) -
+          (geoRank.get(b.userId) ?? Number.MAX_SAFE_INTEGER),
+      )
+      .slice(0, etaBudget);
+
+    const etaSeconds = new Map<string, number>();
+    await Promise.all(
+      top.map(async (profile) => {
+        const point = await this.resolveDriverPoint(profile.userId);
+        if (!point) return;
+        const chordKm = haversineKm(point, pickup);
+        if (!Number.isFinite(chordKm)) return;
+        let seconds = Math.round((chordKm * 1000 * 1.25) / 6.1);
+        if (this.googleRoutes.isEnabled && chordKm <= 12) {
+          try {
+            const route = await this.googleRoutes.getDirections(point, pickup);
+            if (route?.durationS && route.durationS > 0) {
+              seconds = route.durationS;
+            }
+          } catch {
+            // Keep haversine proxy.
+          }
+        }
+        etaSeconds.set(profile.userId, seconds);
+      }),
+    );
+
+    return [...eligible].sort((a, b) => {
+      const aEta =
+        etaSeconds.get(a.userId) ??
+        ((geoRank.get(a.userId) ?? 999) + 1) * 60;
+      const bEta =
+        etaSeconds.get(b.userId) ??
+        ((geoRank.get(b.userId) ?? 999) + 1) * 60;
+      if (aEta !== bEta) return aEta - bEta;
+
+      const ratingDiff = Number(b.ratingAvg) - Number(a.ratingAvg);
+      if (ratingDiff !== 0) return ratingDiff;
+
+      const aIdle = a.idleSince ? a.idleSince.getTime() : 0;
+      const bIdle = b.idleSince ? b.idleSince.getTime() : 0;
+      return aIdle - bIdle;
+    });
+  }
+
+  private async resolveDriverPoint(
+    driverId: string,
+  ): Promise<GeoPoint | null> {
+    if (this.locationSvc.enabled && !this.locationSvc.isOpen) {
+      try {
+        const loc = await this.locationSvc.get<{ lat?: number; lng?: number }>(
+          `/drivers/point/${driverId}`,
+          undefined,
+          800,
+        );
+        if (loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lng)) {
+          return { lat: Number(loc.lat), lng: Number(loc.lng) };
+        }
+      } catch {
+        // Fall through to history.
+      }
+    }
+    try {
+      const rows: Array<{ lat: number; lng: number }> =
+        await this.driverProfiles.query(
+          `SELECT lat, lng FROM driver_location_history
+            WHERE "driverId"::text = $1
+            ORDER BY "recordedAt" DESC LIMIT 1`,
+          [driverId],
+        );
+      if (
+        rows[0] &&
+        Number.isFinite(rows[0].lat) &&
+        Number.isFinite(rows[0].lng)
+      ) {
+        return { lat: Number(rows[0].lat), lng: Number(rows[0].lng) };
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  /**
    * location-svc's /drivers/nearby already returns driverIds ordered
    * nearest-first (it wraps geo.Store.NearestDrivers, which sorts by
    * haversine distance under the hood) — we don't get raw coordinates
@@ -3172,11 +3408,19 @@ export class RidesService {
     let staleMatched = 0;
 
     const staleOffers = await this.rides.find({
-      where: {
-        status: RideStatus.OFFERED,
-        offerExpiresAt: LessThan(new Date(now - REAP_GRACE_MS)),
-      },
-      order: { offerExpiresAt: 'ASC' },
+      where: [
+        {
+          status: RideStatus.OFFERED,
+          offerExpiresAt: LessThan(new Date(now - REAP_GRACE_MS)),
+        },
+        {
+          // NULL expiry never matched LessThan — those offers stuck forever.
+          status: RideStatus.OFFERED,
+          offerExpiresAt: IsNull(),
+          updatedAt: LessThan(new Date(now - OFFER_TIMEOUT_MS - REAP_GRACE_MS)),
+        },
+      ],
+      order: { updatedAt: 'ASC' },
       take: REAP_BATCH_SIZE,
     });
     for (const ride of staleOffers) {
@@ -3198,8 +3442,8 @@ export class RidesService {
       unmatched += 1;
     }
 
-    // Accept claimed MATCHED then crashed (or cancel raced poorly on older
-    // builds). Close the row and free the driver so neither side is stuck.
+    // Accept claimed MATCHED then crashed. Marketplace trips rematch so the
+    // rider is not forced to rebook; street-hail stays cancelled.
     const hungMatched = await this.rides.find({
       where: {
         status: RideStatus.MATCHED,
@@ -3209,10 +3453,26 @@ export class RidesService {
       take: REAP_BATCH_SIZE,
     });
     for (const ride of hungMatched) {
+      if (ride.driverId && !this.rideHasStartCodeGate(ride)) {
+        try {
+          await this.rematchAfterDriverCancel(
+            ride,
+            ride.driverId,
+            'Matching could not be confirmed; finding another driver',
+          );
+          staleMatched += 1;
+          continue;
+        } catch (error) {
+          this.logger.warn(
+            `Hung MATCHED rematch failed for ${ride.id}: ${(error as Error).message}`,
+          );
+        }
+      }
       const closed = await this.rides.update(
         { id: ride.id, status: RideStatus.MATCHED },
         {
           status: RideStatus.CANCELLED,
+          driverId: null,
           offerDriverId: null,
           offerExpiresAt: null,
         },

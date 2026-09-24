@@ -2,6 +2,8 @@ import {
   angularDifference,
   bearing,
   haversineKm,
+  hexCellsAround,
+  radiusKmForHexRing,
   zoneBoundary,
   zoneCenter,
   zoneIdFor,
@@ -52,5 +54,20 @@ describe('geo.util', () => {
     const from = { lat: 9.0, lng: 38.7 };
     const to = { lat: 9.1, lng: 38.7 };
     expect(bearing(from, to)).toBeCloseTo(0, 0);
+  });
+
+  it('hexCellsAround expands from the pickup cell', () => {
+    const pickup = { lat: 8.9878, lng: 38.791 };
+    const ring0 = hexCellsAround(pickup, 0);
+    const ring1 = hexCellsAround(pickup, 1);
+    expect(ring0).toHaveLength(1);
+    expect(ring0[0]).toBe(zoneIdFor(pickup));
+    expect(ring1.length).toBeGreaterThan(ring0.length);
+    expect(ring1).toEqual(expect.arrayContaining(ring0));
+  });
+
+  it('radiusKmForHexRing grows with the ring', () => {
+    expect(radiusKmForHexRing(0)).toBeLessThan(radiusKmForHexRing(3));
+    expect(radiusKmForHexRing(7)).toBeGreaterThan(5);
   });
 });

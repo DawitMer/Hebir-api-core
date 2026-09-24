@@ -25,8 +25,9 @@ import {
   DISPATCH_STATE_PREFIX,
   DispatchJob,
   DispatchState,
-  INITIAL_RADIUS_KM,
   MAX_DISPATCH_MS,
+  initialDispatchState,
+  normalizeDispatchState,
 } from './dispatch.types';
 
 type DispatchRideProcessor = Pick<
@@ -61,17 +62,13 @@ export class DispatchQueueService implements OnModuleInit {
     }
   }
 
-  /** Start (or restart) expanding-radius search for a ride. */
+  /** Start (or restart) hexagonal expanding-ring search for a ride. */
   async enqueueDispatch(
     rideId: string,
     delayMs = 0,
     skipDriverIds: string[] = [],
   ): Promise<void> {
-    const state: DispatchState = {
-      startedAt: Date.now(),
-      radiusKm: INITIAL_RADIUS_KM,
-      triedDriverIds: [...new Set(skipDriverIds.filter(Boolean))],
-    };
+    const state = initialDispatchState(skipDriverIds);
     await this.saveState(rideId, state);
     await this.scheduleJob(
       {
@@ -84,13 +81,10 @@ export class DispatchQueueService implements OnModuleInit {
     );
   }
 
-  /** Continue search after a decline / timeout (keeps tried drivers + radius). */
+  /** Continue search after a decline / timeout (keeps tried drivers + ring). */
   async enqueueContinue(rideId: string, delayMs = 0): Promise<void> {
-    const state = (await this.loadState(rideId)) ?? {
-      startedAt: Date.now(),
-      radiusKm: INITIAL_RADIUS_KM,
-      triedDriverIds: [],
-    };
+    const state =
+      (await this.loadState(rideId)) ?? initialDispatchState();
     await this.scheduleJob(
       {
         id: randomUUID(),
@@ -107,11 +101,8 @@ export class DispatchQueueService implements OnModuleInit {
     offerDriverId: string,
     delayMs: number,
   ): Promise<void> {
-    const state = (await this.loadState(rideId)) ?? {
-      startedAt: Date.now(),
-      radiusKm: INITIAL_RADIUS_KM,
-      triedDriverIds: [],
-    };
+    const state =
+      (await this.loadState(rideId)) ?? initialDispatchState();
     await this.scheduleJob(
       {
         id: randomUUID(),
@@ -128,7 +119,7 @@ export class DispatchQueueService implements OnModuleInit {
     const ttlSec = Math.ceil(MAX_DISPATCH_MS / 1000) + 120;
     await this.redis.set(
       `${DISPATCH_STATE_PREFIX}${rideId}`,
-      JSON.stringify(state),
+      JSON.stringify(normalizeDispatchState(state)),
       'EX',
       ttlSec,
     );
@@ -138,7 +129,7 @@ export class DispatchQueueService implements OnModuleInit {
     const raw = await this.redis.get(`${DISPATCH_STATE_PREFIX}${rideId}`);
     if (!raw) return null;
     try {
-      return JSON.parse(raw) as DispatchState;
+      return normalizeDispatchState(JSON.parse(raw) as Partial<DispatchState>);
     } catch {
       return null;
     }
@@ -205,7 +196,9 @@ export class DispatchQueueService implements OnModuleInit {
       if (!raw) continue;
       let job: DispatchJob;
       try {
-        job = JSON.parse(raw) as DispatchJob;
+        const parsed = JSON.parse(raw) as DispatchJob;
+        const state = normalizeDispatchState(parsed);
+        job = { ...parsed, ...state };
       } catch {
         await this.redis.del(`${DISPATCH_JOB_PREFIX}${jobId}`);
         continue;
@@ -288,11 +281,12 @@ export class DispatchQueueService implements OnModuleInit {
     this.logger.log(`Recovering ${active.length} in-flight dispatch ride(s)`);
     for (const ride of active) {
       const existing = await this.loadState(ride.id);
-      const state: DispatchState = existing ?? {
-        startedAt: ride.requestedAt?.getTime() ?? Date.now(),
-        radiusKm: INITIAL_RADIUS_KM,
-        triedDriverIds: ride.offerDriverId ? [ride.offerDriverId] : [],
-      };
+      const state: DispatchState =
+        existing ??
+        normalizeDispatchState({
+          startedAt: ride.requestedAt?.getTime() ?? Date.now(),
+          triedDriverIds: ride.offerDriverId ? [ride.offerDriverId] : [],
+        });
       await this.saveState(ride.id, state);
 
       if (

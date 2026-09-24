@@ -17,6 +17,7 @@ import { clearLiveTrack } from './ride-live-track';
 import { REDIS_CLIENT } from '../../redis/redis.module';
 import Redis from 'ioredis';
 import { PromotionsService } from '../promotions/promotions.service';
+import { LocationSvcClient } from '../../common/location-svc/location-svc.client';
 
 @Injectable()
 export class AdminRidesService {
@@ -30,6 +31,7 @@ export class AdminRidesService {
     private readonly dispatchQueue: DispatchQueueService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     @Optional() private readonly promotionsService?: PromotionsService,
+    @Optional() private readonly locationSvc?: LocationSvcClient,
   ) {}
 
   async forceCancelRide(
@@ -58,6 +60,7 @@ export class AdminRidesService {
 
       const heldDriverId = ride.driverId ?? ride.offerDriverId;
       ride.status = RideStatus.CANCELLED;
+      ride.driverId = null;
       ride.offerDriverId = null;
       ride.offerExpiresAt = null;
       ride.cancellationType = 'admin_force_cancel';
@@ -91,17 +94,26 @@ export class AdminRidesService {
         await this.promotionsService.refundPromotion(manager, rideId);
       }
 
-      return { cancelledRide, heldDriverId };
+      return { cancelledRide, heldDriverId, riderId: ride.riderId };
     });
 
     // Redis contains accelerators only. The transaction above is the source
     // of truth; cleanup and notification failures are logged and safe to
     // retry without mutating a terminal ride again.
-    const cleanup = [
+    const cleanup: Array<Promise<unknown>> = [
       this.dispatchQueue.clearState(rideId),
       clearLiveTrack(this.redis, result.heldDriverId, rideId),
-      this.redis.del(`rides:start_code:${rideId}`),
+      // Must match RidesService START_CODE_PREFIX (`ride:startcode:`).
+      this.redis.del(`ride:startcode:${rideId}`),
     ];
+    if (result.heldDriverId) {
+      cleanup.push(this.redis.del(`ride:offer:driver:${result.heldDriverId}`));
+    }
+    if (this.locationSvc?.enabled && !this.locationSvc.isOpen) {
+      cleanup.push(
+        this.locationSvc.post('/demand/release', { riderId: result.riderId }, 1000),
+      );
+    }
     const cleanupResults = await Promise.allSettled(cleanup);
     cleanupResults.forEach((cleanupResult) => {
       if (cleanupResult.status === 'rejected') {
@@ -111,21 +123,33 @@ export class AdminRidesService {
       }
     });
 
+    const updatedAt = new Date().toISOString();
+    const payload = {
+      rideId,
+      reason: 'Ride was cancelled by an authorized operator.',
+      updatedAt,
+      status: RideStatus.CANCELLED,
+      cancelledBy: 'admin',
+    };
     const notifications = [
       this.notifications.notify(
         result.cancelledRide.riderId,
         'ride.cancelled',
-        {
-          rideId,
-          reason: 'Ride was cancelled by an authorized operator.',
-        },
+        payload,
+      ),
+      this.notifications.notify(
+        result.cancelledRide.riderId,
+        'ride.status_changed',
+        { rideId, status: RideStatus.CANCELLED, updatedAt },
       ),
     ];
     if (result.heldDriverId) {
       notifications.push(
-        this.notifications.notify(result.heldDriverId, 'ride.cancelled', {
+        this.notifications.notify(result.heldDriverId, 'ride.cancelled', payload),
+        this.notifications.notify(result.heldDriverId, 'ride.status_changed', {
           rideId,
-          reason: 'Ride was cancelled by an authorized operator.',
+          status: RideStatus.CANCELLED,
+          updatedAt,
         }),
       );
     }

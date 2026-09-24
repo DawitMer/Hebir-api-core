@@ -102,12 +102,14 @@ describe('RidesService.acceptOffer race', () => {
       { find: jest.fn() } as never,
       { find: jest.fn() } as never,
       testFareService(),
+      { getActiveRates: jest.fn().mockResolvedValue({}) } as never,
       { mayAccessMarketplace: jest.fn().mockResolvedValue(true) } as never,
       kyc as never,
       notifications as never,
       { get: jest.fn() } as never,
       locationSvc as never,
       geocoding as never,
+      { isEnabled: false, getDirections: jest.fn() } as never,
       redis as never,
       dispatchQueue as never,
       { settleFare: jest.fn() } as never,
@@ -275,12 +277,14 @@ describe('RidesService.transitionStatus geofence', () => {
         { find: jest.fn() } as never,
         { find: jest.fn() } as never,
         testFareService(),
-        {} as never,
+        { getActiveRates: jest.fn().mockResolvedValue({}) } as never,
+        { mayAccessMarketplace: jest.fn().mockResolvedValue(true) } as never,
         { mapDriverPhotoUrls: jest.fn() } as never,
         { notify: jest.fn() } as never,
         { get: jest.fn() } as never,
         locationSvc as never,
         {} as never,
+        { isEnabled: false, getDirections: jest.fn() } as never,
         redis as never,
         { clearState: jest.fn() } as never,
         { settleFare: jest.fn() } as never,
@@ -338,12 +342,14 @@ describe('RidesService.transitionStatus geofence', () => {
       { find: jest.fn() } as never,
       { find: jest.fn() } as never,
       testFareService(),
+      { getActiveRates: jest.fn().mockResolvedValue({}) } as never,
       { mayAccessMarketplace: jest.fn().mockResolvedValue(true) } as never,
       { mapDriverPhotoUrls: jest.fn() } as never,
       { notify: jest.fn() } as never,
       { get: jest.fn() } as never,
       locationSvc as never,
       {} as never,
+      { isEnabled: false, getDirections: jest.fn() } as never,
       redis as never,
       { clearState: jest.fn() } as never,
       { settleFare: jest.fn() } as never,
@@ -417,6 +423,7 @@ describe('RidesService.cancelRide rematch', () => {
       { find: jest.fn() } as never,
       { find: jest.fn() } as never,
       testFareService(),
+      { getActiveRates: jest.fn().mockResolvedValue({}) } as never,
       { mayAccessMarketplace: jest.fn().mockResolvedValue(true) } as never,
       { mapDriverPhotoUrls: jest.fn() } as never,
       notifications as never,
@@ -428,6 +435,7 @@ describe('RidesService.cancelRide rematch', () => {
         get: jest.fn(),
       } as never,
       {} as never,
+      { isEnabled: false, getDirections: jest.fn() } as never,
       redis as never,
       dispatchQueue as never,
       { settleFare: jest.fn() } as never,
@@ -449,6 +457,8 @@ describe('RidesService.cancelRide rematch', () => {
 
     expect(result.status).toBe(RideStatus.SEARCHING);
     expect(result.driverId).toBeNull();
+    expect(result.arrivedAt).toBeNull();
+    expect(result.requestedAt).toBeInstanceOf(Date);
     expect(dispatchQueue.enqueueDispatch).toHaveBeenCalledWith(rideId, 0, [
       driverId,
     ]);
@@ -473,6 +483,8 @@ describe('RidesService.cancelRide rematch', () => {
 
     expect(result.status).toBe(RideStatus.SEARCHING);
     expect(result.driverId).toBeNull();
+    expect(result.arrivedAt).toBeNull();
+    expect(result.requestedAt).toBeInstanceOf(Date);
     expect(dispatchQueue.enqueueDispatch).toHaveBeenCalledWith(rideId, 0, [
       driverId,
     ]);
@@ -560,6 +572,7 @@ describe('RidesService authorization and start-code gate', () => {
       { find: jest.fn() } as never,
       { find: jest.fn() } as never,
       testFareService(),
+      { getActiveRates: jest.fn().mockResolvedValue({}) } as never,
       { mayAccessMarketplace: jest.fn().mockResolvedValue(true) } as never,
       kyc as never,
       { notify: jest.fn() } as never,
@@ -571,6 +584,7 @@ describe('RidesService authorization and start-code gate', () => {
         get: jest.fn(),
       } as never,
       {} as never,
+      { isEnabled: false, getDirections: jest.fn() } as never,
       redis as never,
       { clearState: jest.fn(), enqueueDispatch: jest.fn() } as never,
       { settleFare: jest.fn() } as never,

@@ -2,7 +2,7 @@
  * Pure geo helpers for matching / surge zoning.
  * Keep algorithm math here — services only orchestrate I/O.
  */
-import { cellToBoundary, cellToLatLng, latLngToCell } from 'h3-js';
+import { cellToBoundary, cellToLatLng, gridDisk, latLngToCell } from 'h3-js';
 
 export type GeoPoint = { lat: number; lng: number };
 
@@ -15,6 +15,9 @@ export const EARTH_RADIUS_KM = 6371;
  */
 export const H3_SURGE_RESOLUTION = 8;
 
+/** Approximate average edge length (km) at [H3_SURGE_RESOLUTION]. */
+export const H3_RES8_EDGE_KM = 0.461;
+
 /** @deprecated Square grid — kept for reading legacy Redis keys during cutover. */
 export const ZONE_CELL_SIZE_DEGREES = 0.02;
 
@@ -24,6 +27,34 @@ export function zoneIdFor(
   resolution: number = H3_SURGE_RESOLUTION,
 ): string {
   return latLngToCell(point.lat, point.lng, resolution);
+}
+
+/**
+ * H3 k-ring (origin + neighbours) for geographic dispatch expansion.
+ * ring=0 → pickup cell only; ring=1 → cell + 6 neighbours; etc.
+ */
+export function hexCellsAround(
+  point: GeoPoint,
+  ring: number,
+  resolution: number = H3_SURGE_RESOLUTION,
+): string[] {
+  const origin = zoneIdFor(point, resolution);
+  const k = Math.max(0, Math.floor(ring));
+  try {
+    return [...gridDisk(origin, k)];
+  } catch {
+    return [origin];
+  }
+}
+
+/**
+ * Approximate search radius covering an H3 k-ring at surge resolution.
+ * Slightly oversized so Redis GEO fallback still includes hex-boundary drivers.
+ */
+export function radiusKmForHexRing(ring: number): number {
+  const k = Math.max(0, Math.floor(ring));
+  // Res-8 centre-to-centre ≈ 0.9 km; cover ring + half-cell margin.
+  return Math.max(1.0, (k + 1) * H3_RES8_EDGE_KM * 2);
 }
 
 export function zoneCenter(zoneId: string): GeoPoint | null {
