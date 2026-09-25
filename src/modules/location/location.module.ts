@@ -7,6 +7,7 @@ import { Ride } from '../rides/entities/ride.entity';
 import { SubscriptionModule } from '../subscription/subscription.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { RidesModule } from '../rides/rides.module';
+import { OperationsModule } from '../operations/operations.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { RidesModule } from '../rides/rides.module';
     SubscriptionModule,
     NotificationsModule,
     RidesModule,
+    OperationsModule,
   ],
   controllers: [LocationController],
 })

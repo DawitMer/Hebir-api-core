@@ -73,7 +73,11 @@ export class SurgeOpsService {
 
   getState(): SurgeOpsState {
     const namedZoneOverrides = this.readNamedZoneMap();
-    const zoneOverrides = this.readZoneMap();
+    // Always re-expand named Addis zones so demand heat / fare resolve stay
+    // correct even if the persisted hex map is empty or out of date.
+    const fromNamed = expandNamedZoneOverrides(namedZoneOverrides);
+    const stored = this.readZoneMap();
+    const zoneOverrides = { ...fromNamed, ...stored };
     return {
       overrideEnabled: this.readBool(SurgeConfigKeys.overrideEnabled, false),
       overrideMultiplier: this.readNumber(
