@@ -12,6 +12,7 @@ import {
 } from './fare-rates';
 import { computeLiveSurge, DEFAULT_SURGE_CONFIG } from './surge.math';
 import { haversineKm, type GeoPoint } from '../matching/geo/geo.util';
+import { expandNamedZoneOverrides } from '../matching/geo/addis-market-zones';
 
 export interface FareCalculationInput {
   /** Trip distance in kilometers (converted internally to meters). */
@@ -456,7 +457,8 @@ export class FareService {
 
   /**
    * Backend-only surge override from Neon configuration.
-   * Zone map wins over global. Returns null when demand surge should run.
+   * Manual hex → named expand → legacy zone map → optional city-wide.
+   * Returns null when demand surge should run.
    */
   private readOpsSurgeOverride(
     zoneId: string,
@@ -472,30 +474,53 @@ export class FareService {
     }
 
     const max = Math.max(1, maxMultiplier);
+    const readMap = (key: string): Record<string, number> => {
+      try {
+        const raw = this.configuration.get<unknown>(key);
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+        const out: Record<string, number> = {};
+        for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+          const n = Number(v);
+          if (Number.isFinite(n) && n >= 1) out[k] = n;
+        }
+        return out;
+      } catch {
+        return {};
+      }
+    };
+
     try {
-      const zones = this.configuration.get<unknown>('surge_zone_overrides');
-      const zoneMap =
-        zones && typeof zones === 'object' && !Array.isArray(zones)
-          ? (zones as Record<string, unknown>)
-          : {};
-      const raw = zoneMap[zoneId];
-      const z = Number(raw);
-      if (Number.isFinite(z) && z >= 1) {
-        return Math.min(Math.max(1, z), max);
+      const hexMap = readMap('surge_hex_overrides');
+      const zoneMap = readMap('surge_zone_overrides');
+      const named = readMap('surge_named_zone_overrides');
+
+      const pick = (map: Record<string, number>): number | null => {
+        const z = Number(map[zoneId]);
+        if (Number.isFinite(z) && z >= 1) {
+          return Math.min(Math.max(1, z), max);
+        }
+        return null;
+      };
+
+      const fromHex = pick(hexMap);
+      if (fromHex != null) return fromHex;
+
+      const fromZone = pick(zoneMap);
+      if (fromZone != null) return fromZone;
+
+      // Expand named Addis zones if the merged zone map is stale.
+      if (Object.keys(named).length > 0) {
+        const expanded = expandNamedZoneOverrides(named);
+        const fromNamed = pick(expanded);
+        if (fromNamed != null) return fromNamed;
       }
 
-      // Named / hex map active → unlisted hexes follow live demand (not city-wide).
-      const named = this.configuration.get<unknown>(
-        'surge_named_zone_overrides',
-      );
-      const namedActive =
-        named &&
-        typeof named === 'object' &&
-        !Array.isArray(named) &&
-        Object.values(named as Record<string, unknown>).some(
-          (v) => Number(v) > 1.001,
-        );
-      if (namedActive || Object.keys(zoneMap).length > 0) {
+      const namedActive = Object.values(named).some((v) => v > 1.001);
+      if (
+        namedActive ||
+        Object.keys(hexMap).length > 0 ||
+        Object.keys(zoneMap).length > 0
+      ) {
         return null;
       }
     } catch {

@@ -73,6 +73,8 @@ class UpdateSurgeDto {
   @IsOptional() @IsBoolean() overrideEnabled?: boolean;
   @IsOptional() @IsNumber() @Min(1) overrideMultiplier?: number;
   @IsOptional() @IsObject() zoneOverrides?: Record<string, number>;
+  /** Manual per-H3-cell force (preferred over zoneOverrides). */
+  @IsOptional() @IsObject() hexOverrides?: Record<string, number>;
   @IsOptional() @IsObject() namedZoneOverrides?: Record<string, number>;
   @IsOptional() @IsBoolean() clearZoneOverrides?: boolean;
   @IsOptional() @IsNumber() @Min(1) maxMultiplier?: number;
@@ -185,6 +187,19 @@ export class OperationsController {
   @RequirePermissions('pricing.view', 'rides.view', 'rides.manage')
   getSurge() {
     return this.surge.getState();
+  }
+
+  /** Resolve an H3 surge cell from lat/lng or validate a cell id. */
+  @Get('surge/cell')
+  @RequirePermissions('pricing.view', 'rides.view', 'rides.manage')
+  resolveSurgeCell(
+    @Query('lat') latRaw?: string,
+    @Query('lng') lngRaw?: string,
+    @Query('zoneId') zoneId?: string,
+  ) {
+    const lat = latRaw != null && latRaw !== '' ? Number(latRaw) : undefined;
+    const lng = lngRaw != null && lngRaw !== '' ? Number(lngRaw) : undefined;
+    return this.surge.resolveCell({ lat, lng, zoneId });
   }
 
   @Patch('surge')
